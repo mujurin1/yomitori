@@ -1,0 +1,4 @@
+.claude/worktrees/
+/x-*
+.claude/wt-reserve.json
+target/
