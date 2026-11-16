@@ -579,6 +579,8 @@ impl App {
                 return;
             }
         };
+        // OCR が同じ高さの文字を隙間で別の行に分けることがあるので、まとめてから選ぶ
+        let lines = cursor_line::merge_lines(&lines);
         let line: Option<&OcrLineInfo> =
             cursor_line::select_line(&lines, cursor - PixelPoint::new(band.x, band.y));
         let Some(line) = line else {

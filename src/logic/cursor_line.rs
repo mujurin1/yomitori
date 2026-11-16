@@ -1,6 +1,7 @@
 //! Win+W（カーソル行キャプチャ）のロジック
 
 use super::geometry::{PixelPoint, PixelRect};
+use super::ocr_support::join_lines;
 
 /// OCR の 1 行。bounds はキャプチャ画像内の物理ピクセル座標
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -21,6 +22,79 @@ pub fn compute_band(cursor: PixelPoint, virtual_screen: PixelRect) -> PixelRect 
         BAND_HEIGHT,
     );
     band.intersect(virtual_screen)
+}
+
+/// まとめる行どうしの横の隙間の上限（行の高さの何倍か）。これを超えたら別の行として切る
+/// （離れた段組みや遠くの文字をつながない）
+pub const MERGE_GAP_HEIGHTS: i32 = 3;
+
+/// Windows OCR は同じ高さの文字を隙間で別の行に分けて返すことがある（等幅のターミナル等）。
+/// 縦の範囲が重なる行（低い方の高さの半分以上）を左から順にまとめて 1 行にする。
+/// 横の隙間が行の高さ × MERGE_GAP_HEIGHTS を超えたら、そこで切る。文字列は空白 1 つでつなぎ、矩形は外接矩形
+pub fn merge_lines(lines: &[OcrLineInfo]) -> Vec<OcrLineInfo> {
+    // 同じ高さの行の集まり（縦に重なるもの）
+    let mut rows: Vec<Vec<&OcrLineInfo>> = Vec::new();
+    let mut sorted: Vec<&OcrLineInfo> = lines.iter().collect();
+    sorted.sort_by_key(|l| (l.bounds.top(), l.bounds.left()));
+    for line in sorted {
+        let row = rows.iter_mut().find(|row| {
+            row.iter()
+                .any(|other| same_height(&other.bounds, &line.bounds))
+        });
+        match row {
+            Some(row) => row.push(line),
+            None => rows.push(vec![line]),
+        }
+    }
+
+    let mut merged = Vec::new();
+    for mut row in rows {
+        row.sort_by_key(|l| l.bounds.left());
+        let mut current: Option<(Vec<&str>, PixelRect)> = None;
+        for line in row {
+            let b = line.bounds;
+            current = Some(match current.take() {
+                Some((mut texts, bounds))
+                    if b.left() - bounds.right()
+                        <= MERGE_GAP_HEIGHTS * bounds.height.max(b.height) =>
+                {
+                    texts.push(&line.text);
+                    (texts, union(bounds, b))
+                }
+                previous => {
+                    if let Some((texts, bounds)) = previous {
+                        merged.push(OcrLineInfo {
+                            text: join_lines(texts),
+                            bounds,
+                        });
+                    }
+                    (vec![line.text.as_str()], b)
+                }
+            });
+        }
+        if let Some((texts, bounds)) = current {
+            merged.push(OcrLineInfo {
+                text: join_lines(texts),
+                bounds,
+            });
+        }
+    }
+    merged
+}
+
+/// 縦の範囲が、低い方の高さの半分以上重なる
+fn same_height(a: &PixelRect, b: &PixelRect) -> bool {
+    let overlap = a.bottom().min(b.bottom()) - a.top().max(b.top());
+    overlap > 0 && overlap * 2 >= a.height.min(b.height)
+}
+
+fn union(a: PixelRect, b: PixelRect) -> PixelRect {
+    PixelRect::from_edges(
+        a.left().min(b.left()),
+        a.top().min(b.top()),
+        a.right().max(b.right()),
+        a.bottom().max(b.bottom()),
+    )
 }
 
 /// カーソルの Y を縦方向に含む行を選ぶ。含む行が無ければ縦の距離が最も近い行。行が無ければ None。
@@ -136,6 +210,86 @@ mod tests {
     #[test]
     fn 行が無ければnone() {
         assert_eq!(None, select_line(&[], PixelPoint::new(50, 10)));
+    }
+
+    fn at(text: &str, x: i32, y: i32, width: i32, height: i32) -> OcrLineInfo {
+        info(text, PixelRect::new(x, y, width, height))
+    }
+
+    #[test]
+    fn 同じ高さで隙間の小さい行は左から順に1行にまとめる() {
+        let lines = [
+            at("--project", 200, 50, 90, 18),
+            at("dotnet", 100, 51, 60, 15),
+            at("D:/path/to/project", 300, 49, 180, 19),
+        ];
+
+        let merged = merge_lines(&lines);
+
+        assert_eq!(1, merged.len(), "{merged:?}");
+        assert_eq!("dotnet --project D:/path/to/project", merged[0].text);
+        assert_eq!(PixelRect::from_edges(100, 49, 480, 68), merged[0].bounds);
+    }
+
+    #[test]
+    fn 横の隙間が行の高さの3倍を超えたら別の行にする() {
+        let height = 20;
+        for (gap, count) in [(height * 3, 1), (height * 3 + 1, 2), (338, 2)] {
+            let lines = [
+                at("left", 100, 50, 200, height),
+                at("far", 300 + gap, 50, 80, height),
+            ];
+
+            assert_eq!(count, merge_lines(&lines).len(), "gap {gap}");
+        }
+    }
+
+    #[test]
+    fn 高さの違う行はまとめない() {
+        let lines = [
+            at("upper", 100, 50, 200, 20),
+            at("lower", 100, 80, 200, 20),
+            at("half", 320, 61, 50, 20),
+        ];
+
+        let merged = merge_lines(&lines);
+
+        // half は upper と 9 px（半分未満）、lower とは重ならないので、どれとも同じ高さではない
+        assert_eq!(3, merged.len(), "{merged:?}");
+    }
+
+    #[test]
+    fn 半分以上重なれば少しずれていても同じ高さとみなす() {
+        let lines = [at("a", 100, 50, 50, 20), at("b", 160, 58, 50, 20)];
+
+        assert_eq!(
+            vec!["a b"],
+            merge_lines(&lines)
+                .iter()
+                .map(|l| l.text.as_str())
+                .collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn カーソルを含むまとまりが選ばれる() {
+        let lines = [
+            at("dotnet", 361, 49, 63, 15),
+            at("run --project D: / path/ to/ project", 436, 49, 337, 19),
+            at("Separate", 1111, 50, 84, 18),
+            at("next line", 361, 80, 100, 18),
+        ];
+        let merged = merge_lines(&lines);
+
+        let chosen = select_line(&merged, PixelPoint::new(470, 58)).expect("選ばれる");
+
+        assert_eq!("dotnet run --project D: / path/ to/ project", chosen.text);
+        assert_eq!(PixelRect::from_edges(361, 49, 773, 68), chosen.bounds);
+    }
+
+    #[test]
+    fn 行が無ければまとめても無い() {
+        assert!(merge_lines(&[]).is_empty());
     }
 
     const SCREEN: PixelRect = PixelRect::new(0, 0, 1920, 1080);
