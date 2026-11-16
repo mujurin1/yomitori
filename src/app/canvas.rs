@@ -248,6 +248,7 @@ impl Canvas {
             PixelRect::new(x, y, width, height),
             pad_x,
             pad_y,
+            frame::to_pixels(preview_style::BORDER_DIP, dpi),
         );
         let _ = unsafe { DeleteObject(font.into()) };
         // UpdateLayeredWindow は Z 順を変えないので、枠より上へ置き直して見せる
@@ -339,7 +340,16 @@ fn measure(font: HFONT, text: &str, max_width: i32) -> (i32, i32) {
 }
 
 /// 背景 #141414 に白で text を描き、画素ごとの不透明度（背景は半透明・文字は不透明）で窓に当てる
-fn draw_layered(hwnd: HWND, font: HFONT, text: &str, r: PixelRect, pad_x: i32, pad_y: i32) {
+/// 外周の border px は白い縁にする
+fn draw_layered(
+    hwnd: HWND,
+    font: HFONT,
+    text: &str,
+    r: PixelRect,
+    pad_x: i32,
+    pad_y: i32,
+    border: i32,
+) {
     if r.is_empty() {
         return;
     }
@@ -385,10 +395,11 @@ fn draw_layered(hwnd: HWND, font: HFONT, text: &str, r: PixelRect, pad_x: i32, p
             );
             let _ = GdiFlush();
             SelectObject(memory, old_font);
-            for pixel in pixels.as_chunks_mut::<4>().0 {
+            for (i, pixel) in pixels.as_chunks_mut::<4>().0.iter_mut().enumerate() {
                 // 白い文字のアンチエイリアスは灰色になるので、一番明るい成分を文字の濃さとみなす
                 let level = pixel[0].max(pixel[1]).max(pixel[2]);
-                *pixel = preview_style::compose(level);
+                let (x, y) = (i as i32 % r.width, i as i32 / r.width);
+                *pixel = preview_style::pixel(x, y, r.width, r.height, border, level);
             }
             update_layered(hwnd, screen, memory, r);
             SelectObject(memory, previous);
