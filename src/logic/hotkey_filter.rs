@@ -116,6 +116,16 @@ impl HotkeyFilter {
             held.remove(&key.virtual_key);
         }
 
+        // 範囲指定中に Esc 以外のキーを押された（Win+Shift+S・Alt+Tab・仮想デスクトップの切り替え等）。
+        // 割り込まれた後に受け皿が中途半端に残らないよう中止し、キーは下のアプリへ渡す
+        if self.capture_active() && !is_modifier(key.virtual_key) {
+            return HookDecision {
+                suppress: false,
+                fire: Some(HotkeyAction::CancelCapture),
+                send_mask_key: false,
+            };
+        }
+
         for binding in &self.bindings {
             if binding.hotkey.virtual_key != key.virtual_key || !binding.hotkey.matches(modifiers) {
                 continue;
@@ -156,6 +166,16 @@ impl HotkeyFilter {
             send_mask_key: false,
         }
     }
+}
+
+/// 修飾キー（単独の押下では範囲指定を中止しない）。左右の区別のあるコードも含む
+pub fn is_modifier(vk: u32) -> bool {
+    matches!(
+        vk,
+        0x10 | 0x11 | 0x12 // Shift・Ctrl・Alt
+            | 0x5B | 0x5C // 左右の Win
+            | 0xA0..=0xA5 // 左右の Shift・Ctrl・Alt
+    )
 }
 
 #[cfg(test)]
@@ -398,6 +418,68 @@ mod tests {
         assert_eq!(Some(HotkeyAction::CursorLine), down(&f, W, WIN_ONLY).fire);
         assert!(up(&f, Q, WIN_ONLY).suppress);
         assert!(up(&f, W, WIN_ONLY).suppress);
+    }
+
+    fn cancel_and_pass() -> HookDecision {
+        HookDecision {
+            suppress: false,
+            fire: Some(HotkeyAction::CancelCapture),
+            send_mask_key: false,
+        }
+    }
+
+    #[test]
+    fn 範囲指定中にesc以外のキーを押すと中止しキーは下へ渡す() {
+        const S: u32 = 0x53;
+        const TAB: u32 = 0x09;
+        const RIGHT: u32 = 0x27;
+        let cases = [
+            (A, NONE),
+            (S, mods(true, false, true, false)), // Win+Shift+S
+            (TAB, ALT_ONLY),                     // Alt+Tab
+            (RIGHT, mods(true, true, false, false)), // Win+Ctrl+→
+        ];
+        for (vk, m) in cases {
+            let f = default_filter();
+            f.set_capture_active(true);
+
+            assert_eq!(cancel_and_pass(), down(&f, vk, m), "{vk:#x} {m:?}");
+            assert_eq!(PASS, up(&f, vk, m), "{vk:#x} {m:?}");
+        }
+    }
+
+    #[test]
+    fn 範囲指定中でも修飾キーの単独の押下では中止しない() {
+        for vk in [
+            0x10, 0x11, 0x12, 0x5B, 0x5C, 0xA0, 0xA1, 0xA2, 0xA3, 0xA4, 0xA5,
+        ] {
+            let f = default_filter();
+            f.set_capture_active(true);
+
+            assert_eq!(PASS, down(&f, vk, NONE), "{vk:#x}");
+            assert_eq!(PASS, up(&f, vk, NONE), "{vk:#x}");
+        }
+    }
+
+    #[test]
+    fn 範囲指定を始めたホットキーの押し続けは中止せず握りつぶす() {
+        let f = default_filter();
+        down(&f, Q, WIN_ONLY);
+        f.set_capture_active(true);
+
+        assert_eq!(SUPPRESSED, down(&f, Q, WIN_ONLY));
+        assert_eq!(SUPPRESSED, up(&f, Q, WIN_ONLY));
+    }
+
+    #[test]
+    fn 範囲指定中でなければ他のキーは今までどおり() {
+        let f = default_filter();
+
+        assert_eq!(PASS, down(&f, A, NONE));
+        assert_eq!(
+            fired(HotkeyAction::RegionCapture, true),
+            down(&f, Q, WIN_ONLY)
+        );
     }
 
     #[test]

@@ -1,6 +1,7 @@
 //! Win32 / WinRT の呼び出し。判定は logic に置き、ここは OS との受け渡しだけにする
 
 pub mod capture;
+pub mod foreground;
 pub mod gdiplus;
 pub mod http;
 pub mod icon;
