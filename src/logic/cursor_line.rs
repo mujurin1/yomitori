@@ -100,7 +100,7 @@ fn union(a: PixelRect, b: PixelRect) -> PixelRect {
 /// Win+W で読む行の範囲を、行の矩形から横に行の高さ × NEAR_X_HEIGHTS 広げる
 pub const NEAR_X_HEIGHTS: f64 = 1.0;
 /// Win+W で読む行の範囲を、行の矩形から縦に行の高さ × NEAR_Y_HEIGHTS 広げる
-pub const NEAR_Y_HEIGHTS: f64 = 0.5;
+pub const NEAR_Y_HEIGHTS: f64 = 1.0;
 
 /// カーソルが行のすぐ近く（行の矩形を NEAR_X_HEIGHTS・NEAR_Y_HEIGHTS だけ広げた範囲）にある行だけを候補にし、
 /// その中から select_line で選ぶ。候補が無ければ None（離れた文字には反応しない）
@@ -327,10 +327,10 @@ mod tests {
             (89, 55, false),  // 11
             (309, 55, true),  // 右の端（300）から 9
             (310, 55, false), // 10（右の端は含まないので外）
-            (200, 45, true),  // 上の端から 5（高さの半分ちょうど）
-            (200, 44, false), // 6
-            (200, 64, true),  // 下の端（60）から 4
-            (200, 65, false), // 5
+            (200, 40, true),  // 上の端から 10（高さ 1 つ分ちょうど）
+            (200, 39, false), // 11
+            (200, 69, true),  // 下の端（60）から 9
+            (200, 70, false), // 10（下の端は含まないので外）
         ];
         for (x, y, near) in cases {
             assert_eq!(
