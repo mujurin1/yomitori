@@ -10,7 +10,7 @@ use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::thread;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, WPARAM};
 use windows::Win32::Graphics::Dwm::DwmFlush;
@@ -68,6 +68,10 @@ const MENU: [MenuItem; 4] = [
 
 /// Win+W の枠を消すタイマーの id はこれに枠の番号を足す（枠ごとに別のタイマーにして、古い訳が遅れて届いても新しい枠の消す予定を潰さない）
 const MARKER_TIMER_BASE: usize = 0x1000;
+/// 「文字なし」を消すタイマーの id（同時に 1 つだけなので固定）。MARKER_TIMER_BASE より小さくする
+const HINT_TIMER: usize = 0x0FFF;
+/// OCR の結果が文字なしの時に、カーソルの近くに「文字なし」を出しておく時間
+const NO_TEXT_HINT_VISIBLE: Duration = Duration::from_millis(700);
 
 /// エクスプローラーが再起動した時にトレイのアイコンを置き直すための登録メッセージ
 static TASKBAR_CREATED: AtomicU32 = AtomicU32::new(0);
@@ -133,6 +137,8 @@ struct App {
     foreground_watch: Option<ForegroundWatch>,
     /// Win+W の枠。番号は消す予定のタイマーと突き合わせる
     marker: Option<(u64, Canvas)>,
+    /// 「文字なし」の知らせ
+    hint: Option<Canvas>,
     next_id: u64,
     result: ResultWindow,
     ocr: Arc<OcrService>,
@@ -238,6 +244,7 @@ impl App {
             overlay: None,
             foreground_watch: None,
             marker: None,
+            hint: None,
             next_id: 1,
             result,
             ocr,
@@ -413,6 +420,18 @@ impl App {
 
     fn close_line_marker(&mut self) {
         self.marker = None;
+        // 次のキャプチャに写らないよう「文字なし」も消す
+        self.hint = None;
+    }
+
+    /// OCR の結果が文字なし。結果ウィンドウは出さず（出ていれば中身を残す）、翻訳もせず、
+    /// カーソルの近くに「文字なし」を少しの間だけ出す
+    fn show_no_text_hint(&mut self) {
+        let mut hint = Canvas::new();
+        hint.show_hint(system::cursor_position(), "文字なし");
+        self.hint = Some(hint);
+        let millis = NO_TEXT_HINT_VISIBLE.as_millis() as u32;
+        unsafe { SetTimer(Some(self.hwnd), HINT_TIMER, millis, None) };
     }
 
     /// 範囲指定中に region・line のホットキーが押された。受け皿・枠が次のキャプチャに写らないよう、
@@ -505,7 +524,11 @@ impl App {
                     lines.iter().map(|l| &l.text),
                     self.settings.keep_line_breaks,
                 );
-                self.result.show_text(&text);
+                if text.is_empty() {
+                    self.show_no_text_hint();
+                } else {
+                    self.result.show_text(&text);
+                }
             }
             Err(e) => self
                 .result
@@ -559,12 +582,12 @@ impl App {
         let line: Option<&OcrLineInfo> =
             cursor_line::select_line(&lines, cursor - PixelPoint::new(band.x, band.y));
         let Some(line) = line else {
-            self.result.show_text("");
+            self.show_no_text_hint();
             return;
         };
         let text = ocr_support::join_lines([&line.text]);
         if text.is_empty() {
-            self.result.show_text("");
+            self.show_no_text_hint();
             return;
         }
 
@@ -621,7 +644,7 @@ impl App {
             .as_ref()
             .is_some_and(|(marker_id, _)| *marker_id == id)
         {
-            self.close_line_marker();
+            self.marker = None;
         }
     }
 }
@@ -717,6 +740,13 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
         WM_COMMAND => {
             let id = (wparam.0 & 0xFFFF) as u32;
             if !with_app(|app| app.on_command(id)) {
+                repost(hwnd, msg, wparam, lparam);
+            }
+            LRESULT(0)
+        }
+        WM_TIMER if wparam.0 == HINT_TIMER => {
+            let _ = unsafe { KillTimer(Some(hwnd), HINT_TIMER) };
+            if !with_app(|app| app.hint = None) {
                 repost(hwnd, msg, wparam, lparam);
             }
             LRESULT(0)
