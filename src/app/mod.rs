@@ -13,6 +13,7 @@ use std::thread;
 use std::time::Instant;
 
 use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, WPARAM};
+use windows::Win32::Graphics::Dwm::DwmFlush;
 use windows::Win32::System::Com::{COINIT_APARTMENTTHREADED, CoInitializeEx};
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::UI::HiDpi::GetDpiForWindow;
@@ -414,10 +415,19 @@ impl App {
         self.marker = None;
     }
 
-    fn start_region_capture(&mut self) {
-        if self.overlay.is_some() {
+    /// 範囲指定中に region・line のホットキーが押された。受け皿・枠が次のキャプチャに写らないよう、
+    /// 中止して、消えた画面が合成されるのを待ってから撮る
+    fn cancel_overlay_before_capture(&mut self) {
+        if self.overlay.is_none() {
             return;
         }
+        self.cancel_overlay(None);
+        let _ = unsafe { DwmFlush() };
+    }
+
+    fn start_region_capture(&mut self) {
+        // 範囲指定中なら、今のカーソル位置を起点にやり直す
+        self.cancel_overlay_before_capture();
         if let Some(error) = self.ocr.error().map(str::to_string) {
             self.result.show_message(&error, "");
             return;
@@ -504,9 +514,11 @@ impl App {
     }
 
     fn capture_cursor_line(&mut self) {
-        if self.overlay.is_some() || self.capturing_line {
+        if self.capturing_line {
             return;
         }
+        // 範囲指定中なら中止してからカーソル行を読む
+        self.cancel_overlay_before_capture();
         if let Some(error) = self.ocr.error().map(str::to_string) {
             self.result.show_message(&error, "");
             return;

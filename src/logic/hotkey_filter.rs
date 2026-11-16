@@ -116,16 +116,7 @@ impl HotkeyFilter {
             held.remove(&key.virtual_key);
         }
 
-        // 範囲指定中に Esc 以外のキーを押された（Win+Shift+S・Alt+Tab・仮想デスクトップの切り替え等）。
-        // 割り込まれた後に受け皿が中途半端に残らないよう中止し、キーは下のアプリへ渡す
-        if self.capture_active() && !is_modifier(key.virtual_key) {
-            return HookDecision {
-                suppress: false,
-                fire: Some(HotkeyAction::CancelCapture),
-                send_mask_key: false,
-            };
-        }
-
+        // 設定のホットキーは範囲指定中でも同じく発火して握りつぶす（範囲指定のやり直し・カーソル行は UI が決める）
         for binding in &self.bindings {
             if binding.hotkey.virtual_key != key.virtual_key || !binding.hotkey.matches(modifiers) {
                 continue;
@@ -135,6 +126,16 @@ impl HotkeyFilter {
                 suppress: true,
                 fire: Some(binding.action),
                 send_mask_key: binding.hotkey.needs_mask_key(),
+            };
+        }
+
+        // 範囲指定中に Esc とホットキー以外のキーを押された（Win+Shift+S・Alt+Tab・仮想デスクトップの切り替え等）。
+        // 割り込まれた後に受け皿が中途半端に残らないよう中止し、キーは下のアプリへ渡す
+        if self.capture_active() && !is_modifier(key.virtual_key) {
+            return HookDecision {
+                suppress: false,
+                fire: Some(HotkeyAction::CancelCapture),
+                send_mask_key: false,
             };
         }
         HookDecision::PASS_THROUGH
@@ -469,6 +470,40 @@ mod tests {
 
         assert_eq!(SUPPRESSED, down(&f, Q, WIN_ONLY));
         assert_eq!(SUPPRESSED, up(&f, Q, WIN_ONLY));
+    }
+
+    #[test]
+    fn 範囲指定中でも設定のホットキーは発火して握りつぶす() {
+        for (vk, action) in [
+            (Q, HotkeyAction::RegionCapture),
+            (W, HotkeyAction::CursorLine),
+        ] {
+            let f = default_filter();
+            f.set_capture_active(true);
+
+            assert_eq!(fired(action, true), down(&f, vk, WIN_ONLY), "{vk:#x}");
+            assert_eq!(SUPPRESSED, up(&f, vk, WIN_ONLY), "{vk:#x}");
+        }
+    }
+
+    #[test]
+    fn 範囲指定中に押したホットキーの押し続けは一度しか発火しない() {
+        let f = default_filter();
+        f.set_capture_active(true);
+        down(&f, W, WIN_ONLY);
+
+        for _ in 0..3 {
+            assert_eq!(SUPPRESSED, down(&f, W, WIN_ONLY));
+        }
+    }
+
+    #[test]
+    fn 範囲指定中に修飾違いのホットキーのキーは中止して下へ渡す() {
+        let f = default_filter();
+        f.set_capture_active(true);
+
+        assert_eq!(cancel_and_pass(), down(&f, Q, NONE));
+        assert_eq!(cancel_and_pass(), down(&f, W, CTRL_ONLY));
     }
 
     #[test]
