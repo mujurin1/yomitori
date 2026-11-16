@@ -146,3 +146,17 @@ pub fn window_rect(hwnd: HWND) -> Option<PixelRect> {
     unsafe { GetWindowRect(hwnd, &mut r) }.ok()?;
     Some(PixelRect::from_edges(r.left, r.top, r.right, r.bottom))
 }
+
+/// 窓が現れる・消える時の DWM のアニメーション（フェード）を止める。表示する前に呼ぶ。
+/// 範囲・プレビューの窓は出すたびに作り直すので、フェードの途中（薄い状態）が見えてしまうため。失敗しても続ける
+pub fn disable_transitions(hwnd: HWND) {
+    let disable: windows::core::BOOL = true.into();
+    let _ = unsafe {
+        windows::Win32::Graphics::Dwm::DwmSetWindowAttribute(
+            hwnd,
+            windows::Win32::Graphics::Dwm::DWMWA_TRANSITIONS_FORCEDISABLED,
+            &disable as *const _ as *const core::ffi::c_void,
+            size_of::<windows::core::BOOL>() as u32,
+        )
+    };
+}

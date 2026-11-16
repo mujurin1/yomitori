@@ -79,6 +79,7 @@ fn create_part(class: PCWSTR, alpha: Option<u8>) -> Option<HWND> {
             None,
         )
         .ok()?;
+        system::disable_transitions(hwnd);
         // 窓全体の不透明度を決めた層付きの窓には UpdateLayeredWindow が効かないので、どちらか一方だけにする
         if let Some(alpha) = alpha {
             let _ = SetLayeredWindowAttributes(hwnd, COLORREF(0), alpha, LWA_ALPHA);

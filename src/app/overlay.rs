@@ -114,6 +114,7 @@ impl RegionOverlay {
                 None,
             )
             .ok()?;
+            system::disable_transitions(hwnd);
             let _ = SetLayeredWindowAttributes(hwnd, COLORREF(0), CATCHER_ALPHA, LWA_ALPHA);
             let _ = SetWindowPos(
                 hwnd,
