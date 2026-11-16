@@ -6,6 +6,7 @@ pub mod gdiplus;
 pub mod http;
 pub mod icon;
 pub mod keyboard_hook;
+pub mod mouse_hook;
 pub mod ocr;
 pub mod single_instance;
 pub mod system;
