@@ -21,7 +21,8 @@ use windows::Win32::UI::WindowsAndMessaging::{
     CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW, GetMessageW, KillTimer, MSG,
     PostMessageW, PostQuitMessage, RegisterClassW, RegisterWindowMessageW, SetTimer,
     TranslateMessage, WINDOW_STYLE, WM_APP, WM_CAPTURECHANGED, WM_COMMAND, WM_DESTROY,
-    WM_DPICHANGED, WM_RBUTTONUP, WM_TIMER, WNDCLASSW, WS_EX_TOOLWINDOW,
+    WM_DPICHANGED, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEMOVE, WM_RBUTTONDOWN, WM_RBUTTONUP,
+    WM_TIMER, WNDCLASSW, WS_EX_TOOLWINDOW,
 };
 use windows::core::w;
 
@@ -29,7 +30,7 @@ use crate::logic::cursor_line::{self, OcrLineInfo};
 use crate::logic::geometry::{PixelPoint, PixelRect};
 use crate::logic::hotkey_filter::{HotkeyAction, HotkeyBinding};
 use crate::logic::ocr_support;
-use crate::logic::region_selection::line_marker_timing;
+use crate::logic::region_selection::{MouseInput, line_marker_timing};
 use crate::logic::settings::AppSettings;
 use crate::logic::settings_store::{RealSettingsFiles, SettingsStore};
 use crate::logic::translation::{GoogleGtxTranslator, PendingTranslation, TranslationOutcome};
@@ -38,6 +39,7 @@ use crate::platform::foreground::ForegroundWatch;
 use crate::platform::http::UreqHttp;
 use crate::platform::icon::{self, AppIcon};
 use crate::platform::keyboard_hook::KeyboardHook;
+use crate::platform::mouse_hook::{self, MouseHook};
 use crate::platform::ocr::{OcrResult, OcrService};
 use crate::platform::single_instance::SingleInstance;
 use crate::platform::system;
@@ -54,6 +56,10 @@ const WM_APP_TRAY: u32 = WM_APP + 2;
 const WM_APP_CALL: u32 = WM_APP + 3;
 /// 範囲指定中に前面のウィンドウが変わった。wParam は受け皿の番号
 const WM_APP_FOREGROUND_CHANGED: u32 = WM_APP + 4;
+/// 範囲指定中のマウスのボタン（低レベルフックから）。wParam が種類、lParam が位置
+const WM_APP_MOUSE_BUTTON: u32 = WM_APP + 5;
+/// 範囲指定中のマウスの移動（低レベルフックから）。位置は mouse_hook::take_move で取る
+const WM_APP_MOUSE_MOVE: u32 = WM_APP + 6;
 
 const ID_OPEN_SETTINGS: u32 = 1;
 const ID_RELOAD_SETTINGS: u32 = 2;
@@ -135,6 +141,8 @@ struct App {
     overlay: Option<RegionOverlay>,
     /// 範囲指定中だけ前面のウィンドウの変化を見張る
     foreground_watch: Option<ForegroundWatch>,
+    /// 範囲指定中だけマウスを低レベルフックで受ける
+    mouse_hook: Option<MouseHook>,
     /// Win+W の枠。番号は消す予定のタイマーと突き合わせる
     marker: Option<(u64, Canvas)>,
     /// 「文字なし」の知らせ
@@ -243,6 +251,7 @@ impl App {
             hook: None,
             overlay: None,
             foreground_watch: None,
+            mouse_hook: None,
             marker: None,
             hint: None,
             next_id: 1,
@@ -428,7 +437,7 @@ impl App {
     /// カーソルの近くに「文字なし」を少しの間だけ出す
     fn show_no_text_hint(&mut self) {
         let mut hint = Canvas::new();
-        hint.show_hint(system::cursor_position(), "文字なし");
+        hint.show_hint(system::cursor_position(), "(no text)");
         self.hint = Some(hint);
         let millis = NO_TEXT_HINT_VISIBLE.as_millis() as u32;
         unsafe { SetTimer(Some(self.hwnd), HINT_TIMER, millis, None) };
@@ -485,6 +494,13 @@ impl App {
         }
         self.foreground_watch =
             ForegroundWatch::start(self.hwnd, WM_APP_FOREGROUND_CHANGED, id as usize);
+        // 通知などが受け皿より手前に出てもマウスを受けられるよう、低レベルフックで受ける。
+        // 張れなければ受け皿の窓で受ける
+        self.mouse_hook = MouseHook::start(self.hwnd, WM_APP_MOUSE_BUTTON, WM_APP_MOUSE_MOVE).ok();
+        let hooked = self.mouse_hook.is_some();
+        if let Some(overlay) = &mut self.overlay {
+            overlay.set_hooked(hooked);
+        }
     }
 
     fn on_overlay_preview(&mut self, id: u64, text: &str) {
@@ -493,8 +509,25 @@ impl App {
         }
     }
 
-    fn on_overlay_mouse(&mut self, msg: u32, wparam: WPARAM) {
-        let finished = self.overlay.as_mut().and_then(|o| o.on_mouse(msg, wparam));
+    /// 受け皿の窓に来たマウス。低レベルフックで受けている時は使わない（二重に処理しないため）
+    fn on_catcher_mouse(&mut self, msg: u32) {
+        if self.overlay.as_ref().is_none_or(RegionOverlay::hooked) {
+            return;
+        }
+        let p = system::cursor_position();
+        let input = match msg {
+            WM_MOUSEMOVE => MouseInput::Move(p),
+            WM_LBUTTONDOWN => MouseInput::LeftDown(p),
+            WM_LBUTTONUP => MouseInput::LeftUp(p),
+            WM_RBUTTONDOWN => MouseInput::RightDown(p),
+            WM_RBUTTONUP => MouseInput::RightUp(p),
+            _ => return,
+        };
+        self.on_overlay_input(input);
+    }
+
+    fn on_overlay_input(&mut self, input: MouseInput) {
+        let finished = self.overlay.as_mut().and_then(|o| o.on_input(input));
         if let Some(result) = finished {
             self.on_region_finished(result);
         }
@@ -505,6 +538,7 @@ impl App {
             return;
         };
         self.foreground_watch = None;
+        self.mouse_hook = None;
         if let Some(hook) = &self.hook {
             hook.set_capture_active(false);
         }
@@ -582,7 +616,7 @@ impl App {
         // OCR が同じ高さの文字を隙間で別の行に分けることがあるので、まとめてから選ぶ
         let lines = cursor_line::merge_lines(&lines);
         let line: Option<&OcrLineInfo> =
-            cursor_line::select_line(&lines, cursor - PixelPoint::new(band.x, band.y));
+            cursor_line::select_near_line(&lines, cursor - PixelPoint::new(band.x, band.y));
         let Some(line) = line else {
             self.show_no_text_hint();
             return;
@@ -700,7 +734,7 @@ unsafe extern "system" fn catcher_proc(
         with_app(|app| app.on_catcher_capture_lost(hwnd, new_owner));
         return LRESULT(0);
     }
-    if !with_app(|app| app.on_overlay_mouse(msg, wparam)) {
+    if !with_app(|app| app.on_catcher_mouse(msg)) {
         repost(hwnd, msg, wparam, lparam);
     }
     LRESULT(0)
@@ -719,6 +753,21 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
         WM_APP_FOREGROUND_CHANGED => {
             let id = wparam.0 as u64;
             if !with_app(|app| app.cancel_overlay(Some(id))) {
+                repost(hwnd, msg, wparam, lparam);
+            }
+            LRESULT(0)
+        }
+        WM_APP_MOUSE_MOVE => {
+            let input = MouseInput::Move(mouse_hook::take_move());
+            if !with_app(|app| app.on_overlay_input(input)) {
+                repost(hwnd, msg, wparam, lparam);
+            }
+            LRESULT(0)
+        }
+        WM_APP_MOUSE_BUTTON => {
+            if let Some(input) = mouse_hook::decode_button(wparam, lparam)
+                && !with_app(|app| app.on_overlay_input(input))
+            {
                 repost(hwnd, msg, wparam, lparam);
             }
             LRESULT(0)

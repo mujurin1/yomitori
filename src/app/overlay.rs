@@ -21,7 +21,7 @@ use crate::logic::geometry::PixelRect;
 use crate::logic::image::{self, BgraImage};
 use crate::logic::latest_only::LatestOnlyRunner;
 use crate::logic::ocr_support;
-use crate::logic::region_selection::{RegionSelection, region_preview};
+use crate::logic::region_selection::{InputOutcome, MouseInput, RegionInput, region_preview};
 use crate::platform::ocr::OcrService;
 use crate::platform::system;
 
@@ -77,11 +77,12 @@ pub struct RegionOverlay {
     pub id: u64,
     catcher: Option<HWND>,
     canvas: Canvas,
-    selection: RegionSelection,
+    input: RegionInput,
+    /// マウスを低レベルフックで受けている。受け皿の窓のマウスは使わない（二重に処理しないため）
+    hooked: bool,
     snapshot: Arc<Snapshot>,
     runner: LatestOnlyRunner<PixelRect, String, String>,
     last_submitted: Option<PixelRect>,
-    left_pressed: bool,
     finished: bool,
 }
 
@@ -148,14 +149,14 @@ impl RegionOverlay {
             id,
             catcher: Some(catcher),
             canvas: Canvas::new(),
-            selection: RegionSelection::new(start),
+            input: RegionInput::new(start),
+            hooked: false,
             snapshot,
             runner,
             last_submitted: None,
-            left_pressed: false,
             finished: false,
         };
-        overlay.canvas.set_frame(overlay.selection.rect());
+        overlay.canvas.set_frame(overlay.input.selection().rect());
         Some(overlay)
     }
 
@@ -167,46 +168,48 @@ impl RegionOverlay {
         &self.snapshot
     }
 
-    /// 受け皿のマウス。確定か中止で終わったら Some（確定した矩形、中止なら内側が None）
-    pub fn on_mouse(&mut self, msg: u32, wparam: WPARAM) -> Option<Option<PixelRect>> {
+    pub fn set_hooked(&mut self, hooked: bool) {
+        self.hooked = hooked;
+    }
+
+    pub fn hooked(&self) -> bool {
+        self.hooked
+    }
+
+    /// マウスの 1 件。確定か中止で終わったら Some（確定した矩形、中止なら内側が None）
+    pub fn on_input(&mut self, input: MouseInput) -> Option<Option<PixelRect>> {
         if self.finished {
             return None;
         }
-        const MK_RBUTTON: usize = 0x0002;
-        match msg {
-            WM_MOUSEMOVE => self.on_pointer_changed(wparam.0 & MK_RBUTTON != 0),
-            WM_RBUTTONDOWN => self.on_pointer_changed(true),
-            WM_RBUTTONUP => self.on_pointer_changed(false),
-            // 押しは受け皿で受け、離しで確定する（離しが下のアプリへ漏れないように）
-            WM_LBUTTONDOWN => {
-                self.left_pressed = true;
-                if let Some(catcher) = self.catcher {
-                    unsafe { SetCapture(catcher) };
-                }
-            }
-            WM_LBUTTONUP if self.left_pressed => {
-                let result = self.selection.click(system::cursor_position());
+        // 受け皿の窓で受けている時だけ、離しが下のアプリへ漏れないよう押しの間キャプチャする
+        if let (MouseInput::LeftDown(_), false, Some(catcher)) = (input, self.hooked, self.catcher)
+        {
+            unsafe { SetCapture(catcher) };
+        }
+        match self.input.handle(input) {
+            InputOutcome::Moved => self.on_pointer_changed(),
+            InputOutcome::Finished(result) => {
                 self.finish();
                 return Some(result);
             }
-            _ => {}
+            InputOutcome::Ignored => {}
         }
         None
     }
 
-    fn on_pointer_changed(&mut self, right_button_down: bool) {
-        self.selection
-            .move_to(system::cursor_position(), right_button_down);
-        self.canvas.set_frame(self.selection.rect());
+    fn on_pointer_changed(&mut self) {
+        let selection = self.input.selection();
+        let rect = selection.rect();
+        let usable = selection.is_usable();
+        self.canvas.set_frame(rect);
 
-        if !self.selection.is_usable() {
+        if !usable {
             // 範囲が小さすぎる間は前のプレビューも残さない
             self.canvas.hide_preview();
             // 同じ範囲に戻した時に OCR し直してプレビューを出すため
             self.last_submitted = None;
             return;
         }
-        let rect = self.selection.rect();
         if self.last_submitted != Some(rect) {
             self.last_submitted = Some(rect);
             self.runner.submit(rect);
@@ -219,7 +222,7 @@ impl RegionOverlay {
             return;
         }
         // 文字なし・結果が届いた時には範囲が小さくなっていた、なら出さない
-        match region_preview::text_to_show(text, self.selection.is_usable()) {
+        match region_preview::text_to_show(text, self.input.selection().is_usable()) {
             Some(shown) => self.canvas.set_preview(shown),
             None => self.canvas.hide_preview(),
         }

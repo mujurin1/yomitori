@@ -97,6 +97,32 @@ fn union(a: PixelRect, b: PixelRect) -> PixelRect {
     )
 }
 
+/// Win+W で読む行の範囲を、行の矩形から横に行の高さ × NEAR_X_HEIGHTS 広げる
+pub const NEAR_X_HEIGHTS: f64 = 1.0;
+/// Win+W で読む行の範囲を、行の矩形から縦に行の高さ × NEAR_Y_HEIGHTS 広げる
+pub const NEAR_Y_HEIGHTS: f64 = 0.5;
+
+/// カーソルが行のすぐ近く（行の矩形を NEAR_X_HEIGHTS・NEAR_Y_HEIGHTS だけ広げた範囲）にある行だけを候補にし、
+/// その中から select_line で選ぶ。候補が無ければ None（離れた文字には反応しない）
+pub fn select_near_line(lines: &[OcrLineInfo], cursor: PixelPoint) -> Option<&OcrLineInfo> {
+    let near: Vec<OcrLineInfo> = lines
+        .iter()
+        .filter(|l| is_near(&l.bounds, cursor))
+        .cloned()
+        .collect();
+    let chosen = select_line(&near, cursor)?;
+    lines.iter().find(|l| *l == chosen)
+}
+
+fn is_near(b: &PixelRect, cursor: PixelPoint) -> bool {
+    let h = f64::from(b.height);
+    let (x, y) = (f64::from(cursor.x), f64::from(cursor.y));
+    x >= f64::from(b.left()) - h * NEAR_X_HEIGHTS
+        && x < f64::from(b.right()) + h * NEAR_X_HEIGHTS
+        && y >= f64::from(b.top()) - h * NEAR_Y_HEIGHTS
+        && y < f64::from(b.bottom()) + h * NEAR_Y_HEIGHTS
+}
+
 /// カーソルの Y を縦方向に含む行を選ぶ。含む行が無ければ縦の距離が最も近い行。行が無ければ None。
 /// 縦の距離が同じ行が複数あれば（段組みで同じ高さに別の列がある等）、横の距離が近い行、
 /// それも同じなら行の縦の中心が近い行。全部同じなら先の行
@@ -290,6 +316,61 @@ mod tests {
     #[test]
     fn 行が無ければまとめても無い() {
         assert!(merge_lines(&[]).is_empty());
+    }
+
+    #[test]
+    fn 行の端から高さ1つ分の内なら選び外なら選ばない() {
+        // 高さ 10 の行（x 100〜300、y 50〜60）
+        let lines = [at("line", 100, 50, 200, 10)];
+        let cases = [
+            (90, 55, true),   // 左の端から 10（高さ 1 つ分ちょうど）
+            (89, 55, false),  // 11
+            (309, 55, true),  // 右の端（300）から 9
+            (310, 55, false), // 10（右の端は含まないので外）
+            (200, 45, true),  // 上の端から 5（高さの半分ちょうど）
+            (200, 44, false), // 6
+            (200, 64, true),  // 下の端（60）から 4
+            (200, 65, false), // 5
+        ];
+        for (x, y, near) in cases {
+            assert_eq!(
+                near,
+                select_near_line(&lines, PixelPoint::new(x, y)).is_some(),
+                "({x}, {y})"
+            );
+        }
+    }
+
+    #[test]
+    fn 遠くの行は選ばれない() {
+        let lines = [at("far", 700, 50, 200, 10), at("below", 100, 120, 200, 10)];
+
+        assert_eq!(None, select_near_line(&lines, PixelPoint::new(300, 55)));
+    }
+
+    #[test]
+    fn 近くの候補が複数なら今の選び方で選ぶ() {
+        let lines = [at("upper", 100, 40, 200, 10), at("lower", 100, 56, 200, 10)];
+
+        assert_eq!(
+            "upper",
+            select_near_line(&lines, PixelPoint::new(150, 45))
+                .unwrap()
+                .text
+        );
+        assert_eq!(
+            "lower",
+            select_near_line(&lines, PixelPoint::new(150, 60))
+                .unwrap()
+                .text
+        );
+        // どちらにも含まれない間（y 50〜55）は縦に近い方
+        assert_eq!(
+            "lower",
+            select_near_line(&lines, PixelPoint::new(150, 55))
+                .unwrap()
+                .text
+        );
     }
 
     const SCREEN: PixelRect = PixelRect::new(0, 0, 1920, 1080);

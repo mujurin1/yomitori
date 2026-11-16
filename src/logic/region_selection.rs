@@ -55,6 +55,77 @@ impl RegionSelection {
     }
 }
 
+/// 範囲指定中のマウスの 1 件（位置は画面の物理ピクセル）
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum MouseInput {
+    Move(PixelPoint),
+    LeftDown(PixelPoint),
+    LeftUp(PixelPoint),
+    RightDown(PixelPoint),
+    RightUp(PixelPoint),
+}
+
+/// マウスの 1 件を受けた結果
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum InputOutcome {
+    /// 枠が動いた（描き直す）
+    Moved,
+    /// 左の押しから離しまでで終わった。確定した矩形、ほぼ点ならキャンセルで None
+    Finished(Option<PixelRect>),
+    /// 何もしない
+    Ignored,
+}
+
+/// 範囲指定中のマウスの受け方。左の押しから離しで確定する（離しだけでは確定しない）。
+/// 右を押している間の移動は平行移動
+#[derive(Clone, Debug)]
+pub struct RegionInput {
+    selection: RegionSelection,
+    left_pressed: bool,
+    right_down: bool,
+}
+
+impl RegionInput {
+    pub fn new(start: PixelPoint) -> Self {
+        Self {
+            selection: RegionSelection::new(start),
+            left_pressed: false,
+            right_down: false,
+        }
+    }
+
+    pub fn selection(&self) -> &RegionSelection {
+        &self.selection
+    }
+
+    pub fn handle(&mut self, input: MouseInput) -> InputOutcome {
+        match input {
+            MouseInput::Move(p) => {
+                self.selection.move_to(p, self.right_down);
+                InputOutcome::Moved
+            }
+            MouseInput::RightDown(p) => {
+                self.right_down = true;
+                self.selection.move_to(p, true);
+                InputOutcome::Moved
+            }
+            MouseInput::RightUp(p) => {
+                self.right_down = false;
+                self.selection.move_to(p, false);
+                InputOutcome::Moved
+            }
+            MouseInput::LeftDown(_) => {
+                self.left_pressed = true;
+                InputOutcome::Ignored
+            }
+            MouseInput::LeftUp(p) if self.left_pressed => {
+                InputOutcome::Finished(self.selection.click(p))
+            }
+            MouseInput::LeftUp(_) => InputOutcome::Ignored,
+        }
+    }
+}
+
 /// Win+Q の範囲指定中のプレビューに何を出すか
 pub mod region_preview {
     /// 出す文字列。出さない（プレビューを消す）なら None。
@@ -185,6 +256,61 @@ mod tests {
         let mut s = RegionSelection::new(p(0, 0));
 
         assert_eq!(Some(PixelRect::new(0, 0, min, min)), s.click(p(min, min)));
+    }
+
+    #[test]
+    fn 左の押しから離しで離した位置までの矩形で確定する() {
+        let mut input = RegionInput::new(p(10, 10));
+
+        assert_eq!(
+            InputOutcome::Moved,
+            input.handle(MouseInput::Move(p(50, 40)))
+        );
+        assert_eq!(
+            InputOutcome::Ignored,
+            input.handle(MouseInput::LeftDown(p(50, 40)))
+        );
+        assert_eq!(
+            InputOutcome::Finished(Some(PixelRect::new(10, 10, 60, 30))),
+            input.handle(MouseInput::LeftUp(p(70, 40)))
+        );
+    }
+
+    #[test]
+    fn 押しの無い左の離しでは確定しない() {
+        let mut input = RegionInput::new(p(10, 10));
+        input.handle(MouseInput::Move(p(50, 40)));
+
+        assert_eq!(
+            InputOutcome::Ignored,
+            input.handle(MouseInput::LeftUp(p(50, 40)))
+        );
+        assert_eq!(PixelRect::new(10, 10, 40, 30), input.selection().rect());
+    }
+
+    #[test]
+    fn 左の押し離しがほぼ点ならキャンセル() {
+        let mut input = RegionInput::new(p(10, 10));
+        input.handle(MouseInput::LeftDown(p(11, 11)));
+
+        assert_eq!(
+            InputOutcome::Finished(None),
+            input.handle(MouseInput::LeftUp(p(12, 11)))
+        );
+    }
+
+    #[test]
+    fn 右を押している間の移動は平行移動で離すと追従に戻る() {
+        let mut input = RegionInput::new(p(10, 10));
+        input.handle(MouseInput::Move(p(60, 40)));
+
+        input.handle(MouseInput::RightDown(p(60, 40)));
+        input.handle(MouseInput::Move(p(80, 50)));
+        assert_eq!(PixelRect::new(30, 20, 50, 30), input.selection().rect());
+
+        input.handle(MouseInput::RightUp(p(80, 50)));
+        input.handle(MouseInput::Move(p(100, 70)));
+        assert_eq!(PixelRect::new(30, 20, 70, 50), input.selection().rect());
     }
 
     #[test]

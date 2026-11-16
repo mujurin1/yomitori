@@ -33,6 +33,17 @@ impl Sub for PixelPoint {
     }
 }
 
+impl PixelPoint {
+    /// 1 つの整数に詰める（ウィンドウのメッセージの lParam に載せるため）。負の座標もそのまま戻る
+    pub const fn pack(self) -> i64 {
+        ((self.x as i64) << 32) | (self.y as u32 as i64)
+    }
+
+    pub const fn unpack(packed: i64) -> Self {
+        Self::new((packed >> 32) as i32, packed as i32)
+    }
+}
+
 /// 物理ピクセル座標の矩形。right / bottom は含まない（半開区間）
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
 pub struct PixelRect {
@@ -101,6 +112,20 @@ impl PixelRect {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn 点は詰めて戻すと同じになる() {
+        for (x, y) in [
+            (0, 0),
+            (1920, 1080),
+            (-2560, -200),
+            (-1, 7),
+            (i32::MAX, i32::MIN),
+        ] {
+            let p = PixelPoint::new(x, y);
+            assert_eq!(p, PixelPoint::unpack(p.pack()), "({x}, {y})");
+        }
+    }
 
     #[test]
     fn 重ならない矩形との共通部分は空() {
