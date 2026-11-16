@@ -9,12 +9,14 @@ pub const FILL_ALPHA: u8 = 38;
 pub const BACKGROUND_LEVEL: u8 = 0x14;
 /// プレビューの背景の不透明度 92%。文字は不透明
 pub const BACKGROUND_ALPHA: u8 = 235;
+/// プレビューの文字の明るさ（#DCDCDC。白だと眩しいので落とす）
+pub const TEXT_LEVEL: u8 = 0xDC;
 /// プレビューの文字の大きさ（DIP）
 pub const FONT_DIP: f64 = 15.0;
-/// プレビューの箱の外周の白い縁の太さ（DIP）
+/// プレビューの箱の外周の縁の太さ（DIP）
 pub const BORDER_DIP: f64 = 1.0;
-/// 縁の画素（白・不透明。premultiplied BGRA）
-pub const BORDER_PIXEL: [u8; 4] = [255, 255, 255, 255];
+/// 縁の画素（#787878・不透明。premultiplied BGRA）
+pub const BORDER_PIXEL: [u8; 4] = [0x78, 0x78, 0x78, 255];
 
 /// 幅 width・高さ height の箱で、(x, y) が外周の太さ border の縁に入るか
 pub fn is_border(x: i32, y: i32, width: i32, height: i32, border: i32) -> bool {
@@ -35,13 +37,23 @@ pub fn needs_japanese_font(text: &str) -> bool {
     text.chars().any(|c| u32::from(c) > 0x024F)
 }
 
+/// プレビューの書体（Semibold の書体名、それが無い時に落とす Regular の書体名）
+pub fn font_faces(text: &str) -> (&'static str, &'static str) {
+    if needs_japanese_font(text) {
+        ("Yu Gothic UI Semibold", "Yu Gothic UI")
+    } else {
+        ("Segoe UI Semibold", "Segoe UI")
+    }
+}
+
 /// 背景 #141414 の上に白で描いた画素の明るさ（0〜255）から、premultiplied BGRA を作る。
-/// 背景は BACKGROUND_ALPHA で半透明、文字の画素ほど不透明に近づき、文字そのものは不透明になる
+/// 背景は BACKGROUND_ALPHA で半透明、文字の画素ほど不透明に近づき、文字そのものは不透明の TEXT_LEVEL になる。
+/// 白で描くのは文字の濃さ（アンチエイリアス）を明るさから読むため
 pub fn compose(level: u8) -> [u8; 4] {
     let bg = f64::from(BACKGROUND_LEVEL);
     let coverage = ((f64::from(level) - bg) / (255.0 - bg)).clamp(0.0, 1.0);
     let alpha = f64::from(BACKGROUND_ALPHA) + coverage * (255.0 - f64::from(BACKGROUND_ALPHA));
-    let color = bg + coverage * (255.0 - bg);
+    let color = bg + coverage * (f64::from(TEXT_LEVEL) - bg);
     let premultiplied = (color * alpha / 255.0).round() as u8;
     [
         premultiplied,
@@ -73,8 +85,8 @@ mod tests {
     }
 
     #[test]
-    fn 文字の画素は白で透けない() {
-        assert_eq!([255, 255, 255, 255], compose(255));
+    fn 文字の画素はdcdcdcで透けない() {
+        assert_eq!([0xDC, 0xDC, 0xDC, 255], compose(255));
     }
 
     #[test]
@@ -82,12 +94,12 @@ mod tests {
         let [b, _, _, a] = compose(0x80);
 
         assert!(a > BACKGROUND_ALPHA && a < 255, "{a}");
-        assert!(b > 18 && b < 255, "{b}");
+        assert!(b > 18 && b < 0xDC, "{b}");
         assert!(b <= a, "premultiplied は色が不透明度を超えない");
     }
 
     #[test]
-    fn 箱の外周の縁は白で不透明_内側は今の背景() {
+    fn 箱の外周の縁は787878で不透明_内側は今の背景() {
         let (w, h, border) = (10, 6, 1);
         for (x, y) in [
             (0, 0),
@@ -100,7 +112,7 @@ mod tests {
             (9, 3),
         ] {
             assert_eq!(
-                [255, 255, 255, 255],
+                [0x78, 0x78, 0x78, 255],
                 pixel(x, y, w, h, border, BACKGROUND_LEVEL),
                 "({x}, {y})"
             );
@@ -124,6 +136,18 @@ mod tests {
         assert!(!is_border(2, 3, w, h, border));
         assert!(is_border(8, 3, w, h, border));
         assert!(!is_border(7, 3, w, h, border));
+    }
+
+    #[test]
+    fn 書体はsemiboldで無ければ同じ書体のregular() {
+        assert_eq!(
+            ("Segoe UI Semibold", "Segoe UI"),
+            font_faces("The quick brown fox.")
+        );
+        assert_eq!(
+            ("Yu Gothic UI Semibold", "Yu Gothic UI"),
+            font_faces("文字なし")
+        );
     }
 
     #[test]

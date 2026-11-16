@@ -8,8 +8,8 @@ use windows::Win32::Graphics::Gdi::{
     AC_SRC_ALPHA, AC_SRC_OVER, ANTIALIASED_QUALITY, BI_RGB, BITMAPINFO, BITMAPINFOHEADER,
     BLENDFUNCTION, CreateCompatibleDC, CreateDIBSection, CreateFontW, CreateSolidBrush,
     DEFAULT_CHARSET, DIB_RGB_COLORS, DT_CALCRECT, DT_NOPREFIX, DT_WORDBREAK, DeleteDC,
-    DeleteObject, DrawTextW, FW_BOLD, GdiFlush, GetDC, HDC, HFONT, ReleaseDC, SelectObject,
-    SetBkMode, SetTextColor, TRANSPARENT,
+    DeleteObject, DrawTextW, FONT_WEIGHT, FW_NORMAL, FW_SEMIBOLD, GdiFlush, GetDC, GetTextFaceW,
+    HDC, HFONT, ReleaseDC, SelectObject, SetBkMode, SetTextColor, TRANSPARENT,
 };
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::UI::WindowsAndMessaging::{
@@ -287,20 +287,26 @@ impl Drop for Canvas {
     }
 }
 
-/// 白い太字。日本語を含むなら Yu Gothic UI、英字だけなら Segoe UI
+/// Semibold（無ければ同じ書体の Regular）。日本語を含むなら Yu Gothic UI、英字だけなら Segoe UI
 fn create_font(text: &str, dpi: u32) -> HFONT {
-    let face = if preview_style::needs_japanese_font(text) {
-        w!("Yu Gothic UI")
-    } else {
-        w!("Segoe UI")
-    };
+    let (semibold, regular) = preview_style::font_faces(text);
+    let font = font_with_face(semibold, FW_SEMIBOLD, dpi);
+    if face_of(font).eq_ignore_ascii_case(semibold) {
+        return font;
+    }
+    // 書体が無いと GDI は別の書体に置き換えるので、選ばれた書体名で見分けて Regular に落とす
+    let _ = unsafe { DeleteObject(font.into()) };
+    font_with_face(regular, FW_NORMAL, dpi)
+}
+
+fn font_with_face(face: &str, weight: FONT_WEIGHT, dpi: u32) -> HFONT {
     unsafe {
         CreateFontW(
             -frame::to_pixels(preview_style::FONT_DIP, dpi),
             0,
             0,
             0,
-            FW_BOLD.0 as i32,
+            weight.0 as i32,
             0,
             0,
             0,
@@ -310,9 +316,23 @@ fn create_font(text: &str, dpi: u32) -> HFONT {
             // ClearType は透明な背景の上で色がにじむので、グレースケールのアンチエイリアスにする
             ANTIALIASED_QUALITY,
             0,
-            face,
+            &HSTRING::from(face),
         )
     }
+}
+
+/// フォントを DC に選んだ時に実際に使われる書体名
+fn face_of(font: HFONT) -> String {
+    let mut name = [0u16; 64];
+    unsafe {
+        let dc = CreateCompatibleDC(None);
+        let old = SelectObject(dc, font.into());
+        GetTextFaceW(dc, Some(&mut name));
+        SelectObject(dc, old);
+        let _ = DeleteDC(dc);
+    }
+    let len = name.iter().position(|&c| c == 0).unwrap_or(name.len());
+    String::from_utf16_lossy(&name[..len])
 }
 
 /// 折り返しの幅 max_width で text を描いた時の大きさ
@@ -339,8 +359,8 @@ fn measure(font: HFONT, text: &str, max_width: i32) -> (i32, i32) {
     (r.right - r.left, r.bottom - r.top)
 }
 
-/// 背景 #141414 に白で text を描き、画素ごとの不透明度（背景は半透明・文字は不透明）で窓に当てる
-/// 外周の border px は白い縁にする
+/// 背景 #141414 に白で text を描いて文字の濃さを読み、#DCDCDC の文字・半透明の背景・縁の画素にして窓に当てる
+/// 外周の border px は縁（#787878）にする
 fn draw_layered(
     hwnd: HWND,
     font: HFONT,
