@@ -1,5 +1,7 @@
 # yomitori
 
+ダウンロード: [Releases](https://github.com/mujurin1/yomitori/releases/latest)
+
 画面の英語を OCR で読み取り、日本語に訳して表示する Windows の常駐ツール。翻訳には Google 翻訳を使っている
 
 ## 特徴
