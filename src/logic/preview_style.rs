@@ -11,6 +11,24 @@ pub const BACKGROUND_LEVEL: u8 = 0x14;
 pub const BACKGROUND_ALPHA: u8 = 235;
 /// プレビューの文字の大きさ（DIP）
 pub const FONT_DIP: f64 = 15.0;
+/// プレビューの箱の外周の白い縁の太さ（DIP）
+pub const BORDER_DIP: f64 = 1.0;
+/// 縁の画素（白・不透明。premultiplied BGRA）
+pub const BORDER_PIXEL: [u8; 4] = [255, 255, 255, 255];
+
+/// 幅 width・高さ height の箱で、(x, y) が外周の太さ border の縁に入るか
+pub fn is_border(x: i32, y: i32, width: i32, height: i32, border: i32) -> bool {
+    x < border || y < border || x >= width - border || y >= height - border
+}
+
+/// 箱の (x, y) の画素。縁なら白・不透明、内側は compose（背景は半透明・文字は不透明）
+pub fn pixel(x: i32, y: i32, width: i32, height: i32, border: i32, level: u8) -> [u8; 4] {
+    if is_border(x, y, width, height, border) {
+        BORDER_PIXEL
+    } else {
+        compose(level)
+    }
+}
 
 /// 日本語などを含むなら和文のフォント（Yu Gothic UI）、英字だけなら Segoe UI を使う
 pub fn needs_japanese_font(text: &str) -> bool {
@@ -66,6 +84,46 @@ mod tests {
         assert!(a > BACKGROUND_ALPHA && a < 255, "{a}");
         assert!(b > 18 && b < 255, "{b}");
         assert!(b <= a, "premultiplied は色が不透明度を超えない");
+    }
+
+    #[test]
+    fn 箱の外周の縁は白で不透明_内側は今の背景() {
+        let (w, h, border) = (10, 6, 1);
+        for (x, y) in [
+            (0, 0),
+            (9, 0),
+            (0, 5),
+            (9, 5),
+            (4, 0),
+            (4, 5),
+            (0, 3),
+            (9, 3),
+        ] {
+            assert_eq!(
+                [255, 255, 255, 255],
+                pixel(x, y, w, h, border, BACKGROUND_LEVEL),
+                "({x}, {y})"
+            );
+        }
+        for (x, y) in [(1, 1), (8, 4), (4, 3)] {
+            assert_eq!(
+                compose(BACKGROUND_LEVEL),
+                pixel(x, y, w, h, border, BACKGROUND_LEVEL),
+                "({x}, {y})"
+            );
+        }
+    }
+
+    #[test]
+    fn 縁の太さは表示倍率に合わせる() {
+        use crate::logic::frame::to_pixels;
+        assert_eq!(1, to_pixels(BORDER_DIP, 96));
+        assert_eq!(2, to_pixels(BORDER_DIP, 192));
+        let (w, h, border) = (10, 6, to_pixels(BORDER_DIP, 192));
+        assert!(is_border(1, 3, w, h, border));
+        assert!(!is_border(2, 3, w, h, border));
+        assert!(is_border(8, 3, w, h, border));
+        assert!(!is_border(7, 3, w, h, border));
     }
 
     #[test]
