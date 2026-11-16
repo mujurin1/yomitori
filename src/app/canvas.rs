@@ -19,7 +19,7 @@ use windows::Win32::UI::WindowsAndMessaging::{
 use windows::core::{HSTRING, PCWSTR, w};
 
 use crate::logic::frame;
-use crate::logic::geometry::PixelRect;
+use crate::logic::geometry::{PixelPoint, PixelRect};
 use crate::logic::region_selection::preview_placement;
 use crate::platform::system;
 
@@ -32,6 +32,7 @@ const PREVIEW_FONT_DIP: f64 = 14.0;
 const PREVIEW_MAX_WIDTH_DIP: f64 = 600.0;
 const PREVIEW_PADDING_X_DIP: f64 = 6.0;
 const PREVIEW_PADDING_Y_DIP: f64 = 3.0;
+const HINT_OFFSET_DIP: f64 = 16.0;
 
 const EDGE_CLASS: PCWSTR = w!("YomitoriFrameEdge");
 const PREVIEW_CLASS: PCWSTR = w!("YomitoriPreview");
@@ -178,14 +179,7 @@ impl Canvas {
             return;
         };
         let dpi = system::dpi_at(rect);
-        let font = self.font_for(dpi);
-        unsafe { SetWindowLongPtrW(preview, GWLP_USERDATA, font.0 as isize) };
-        let pad_x = frame::to_pixels(PREVIEW_PADDING_X_DIP, dpi);
-        let pad_y = frame::to_pixels(PREVIEW_PADDING_Y_DIP, dpi);
-        let (text_width, text_height) =
-            measure(font, &text, frame::to_pixels(PREVIEW_MAX_WIDTH_DIP, dpi));
-        let width = text_width + pad_x * 2;
-        let height = text_height + pad_y * 2;
+        let (width, height) = self.prepare_preview(preview, &text, dpi);
         let area_top = system::virtual_screen().top();
         let (x, y) = preview_placement::compute(
             f64::from(rect.left()),
@@ -194,6 +188,35 @@ impl Canvas {
             f64::from(area_top),
         );
         place(preview, PixelRect::new(x as i32, y as i32, width, height));
+        let _ = unsafe { InvalidateRect(Some(preview), None, true) };
+    }
+
+    /// プレビューの窓のフォントを dpi に合わせ、text を描く大きさ（余白込み）を返す
+    fn prepare_preview(&mut self, preview: HWND, text: &str, dpi: u32) -> (i32, i32) {
+        let font = self.font_for(dpi);
+        unsafe { SetWindowLongPtrW(preview, GWLP_USERDATA, font.0 as isize) };
+        let pad_x = frame::to_pixels(PREVIEW_PADDING_X_DIP, dpi);
+        let pad_y = frame::to_pixels(PREVIEW_PADDING_Y_DIP, dpi);
+        let (text_width, text_height) =
+            measure(font, text, frame::to_pixels(PREVIEW_MAX_WIDTH_DIP, dpi));
+        (text_width + pad_x * 2, text_height + pad_y * 2)
+    }
+
+    /// 枠を出さずに、点の右下にプレビューと同じ見た目で text を出す（「文字なし」の知らせ）
+    pub fn show_hint(&mut self, at: PixelPoint, text: &str) {
+        let Some(preview) = self.preview else {
+            return;
+        };
+        self.preview_text = Some(text.into());
+        let _ = unsafe { SetWindowTextW(preview, &HSTRING::from(text)) };
+        let dpi = system::dpi_at(PixelRect::new(at.x, at.y, 1, 1));
+        let (width, height) = self.prepare_preview(preview, text, dpi);
+        // カーソルの絵と重ならないよう右下へずらす
+        let offset = frame::to_pixels(HINT_OFFSET_DIP, dpi);
+        place(
+            preview,
+            PixelRect::new(at.x + offset, at.y + offset, width, height),
+        );
         let _ = unsafe { InvalidateRect(Some(preview), None, true) };
     }
 }
