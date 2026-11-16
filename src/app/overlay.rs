@@ -10,9 +10,9 @@ use windows::Win32::UI::Input::KeyboardAndMouse::{ReleaseCapture, SetCapture};
 use windows::Win32::UI::WindowsAndMessaging::{
     CreateWindowExW, DefWindowProcW, DestroyWindow, HWND_TOPMOST, IDC_CROSS, LWA_ALPHA,
     LoadCursorW, MA_NOACTIVATE, RegisterClassW, SWP_NOACTIVATE, SWP_SHOWWINDOW,
-    SetLayeredWindowAttributes, SetWindowPos, WM_CONTEXTMENU, WM_LBUTTONDOWN, WM_LBUTTONUP,
-    WM_MOUSEACTIVATE, WM_MOUSEMOVE, WM_RBUTTONDOWN, WM_RBUTTONUP, WNDCLASSW, WS_EX_LAYERED,
-    WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_POPUP,
+    SetLayeredWindowAttributes, SetWindowPos, WM_CAPTURECHANGED, WM_CONTEXTMENU, WM_LBUTTONDOWN,
+    WM_LBUTTONUP, WM_MOUSEACTIVATE, WM_MOUSEMOVE, WM_RBUTTONDOWN, WM_RBUTTONUP, WNDCLASSW,
+    WS_EX_LAYERED, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_POPUP,
 };
 use windows::core::{PCWSTR, w};
 
@@ -67,7 +67,8 @@ pub fn catcher_default(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) -> 
         WM_MOUSEACTIVATE => Some(LRESULT(MA_NOACTIVATE as isize)),
         // 右ボタンは平行移動にだけ使い、メニューを出さない
         WM_CONTEXTMENU => Some(LRESULT(0)),
-        WM_MOUSEMOVE | WM_LBUTTONDOWN | WM_LBUTTONUP | WM_RBUTTONDOWN | WM_RBUTTONUP => None,
+        WM_MOUSEMOVE | WM_LBUTTONDOWN | WM_LBUTTONUP | WM_RBUTTONDOWN | WM_RBUTTONUP
+        | WM_CAPTURECHANGED => None,
         _ => Some(unsafe { DefWindowProcW(hwnd, msg, wparam, lparam) }),
     }
 }
@@ -156,6 +157,10 @@ impl RegionOverlay {
         };
         overlay.canvas.set_frame(overlay.selection.rect());
         Some(overlay)
+    }
+
+    pub fn catcher(&self) -> Option<HWND> {
+        self.catcher
     }
 
     pub fn snapshot(&self) -> &Arc<Snapshot> {

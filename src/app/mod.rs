@@ -19,8 +19,8 @@ use windows::Win32::UI::HiDpi::GetDpiForWindow;
 use windows::Win32::UI::WindowsAndMessaging::{
     CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW, GetMessageW, KillTimer, MSG,
     PostMessageW, PostQuitMessage, RegisterClassW, RegisterWindowMessageW, SetTimer,
-    TranslateMessage, WINDOW_STYLE, WM_APP, WM_COMMAND, WM_DESTROY, WM_DPICHANGED, WM_RBUTTONUP,
-    WM_TIMER, WNDCLASSW, WS_EX_TOOLWINDOW,
+    TranslateMessage, WINDOW_STYLE, WM_APP, WM_CAPTURECHANGED, WM_COMMAND, WM_DESTROY,
+    WM_DPICHANGED, WM_RBUTTONUP, WM_TIMER, WNDCLASSW, WS_EX_TOOLWINDOW,
 };
 use windows::core::w;
 
@@ -33,6 +33,7 @@ use crate::logic::settings::AppSettings;
 use crate::logic::settings_store::{RealSettingsFiles, SettingsStore};
 use crate::logic::translation::{GoogleGtxTranslator, PendingTranslation, TranslationOutcome};
 use crate::platform::capture::capture_screen;
+use crate::platform::foreground::ForegroundWatch;
 use crate::platform::http::UreqHttp;
 use crate::platform::icon::{self, AppIcon};
 use crate::platform::keyboard_hook::KeyboardHook;
@@ -50,6 +51,8 @@ const WM_APP_HOTKEY: u32 = WM_APP + 1;
 const WM_APP_TRAY: u32 = WM_APP + 2;
 /// lParam に `Box<UiCall>` を Box::into_raw した値を載せる
 const WM_APP_CALL: u32 = WM_APP + 3;
+/// 範囲指定中に前面のウィンドウが変わった。wParam は受け皿の番号
+const WM_APP_FOREGROUND_CHANGED: u32 = WM_APP + 4;
 
 const ID_OPEN_SETTINGS: u32 = 1;
 const ID_RELOAD_SETTINGS: u32 = 2;
@@ -125,6 +128,8 @@ struct App {
     poster: UiPoster,
     hook: Option<KeyboardHook>,
     overlay: Option<RegionOverlay>,
+    /// 範囲指定中だけ前面のウィンドウの変化を見張る
+    foreground_watch: Option<ForegroundWatch>,
     /// Win+W の枠。番号は消す予定のタイマーと突き合わせる
     marker: Option<(u64, Canvas)>,
     next_id: u64,
@@ -230,6 +235,7 @@ impl App {
             poster,
             hook: None,
             overlay: None,
+            foreground_watch: None,
             marker: None,
             next_id: 1,
             result,
@@ -379,12 +385,28 @@ impl App {
         match action {
             HotkeyAction::RegionCapture => self.start_region_capture(),
             HotkeyAction::CursorLine => self.capture_cursor_line(),
-            HotkeyAction::CancelCapture => {
-                if let Some(overlay) = &mut self.overlay {
-                    overlay.cancel();
-                    self.on_region_finished(None);
-                }
-            }
+            HotkeyAction::CancelCapture => self.cancel_overlay(None),
+        }
+    }
+
+    /// 範囲指定を中止する（Esc・他のキーの押下・前面の変化・マウスのキャプチャを外された）。
+    /// id が Some なら、その番号の受け皿の時だけ（古い知らせで新しい範囲指定を中止しないため）
+    fn cancel_overlay(&mut self, id: Option<u64>) {
+        let Some(overlay) = self.overlay.as_mut() else {
+            return;
+        };
+        if id.is_some_and(|id| id != overlay.id) {
+            return;
+        }
+        overlay.cancel();
+        self.on_region_finished(None);
+    }
+
+    /// 受け皿がマウスのキャプチャを失った。自分以外に移ったなら割り込まれたとみなして中止する
+    fn on_catcher_capture_lost(&mut self, catcher: HWND, new_owner: HWND) {
+        let ours = self.overlay.as_ref().and_then(RegionOverlay::catcher) == Some(catcher);
+        if ours && new_owner != catcher {
+            self.cancel_overlay(None);
         }
     }
 
@@ -426,11 +448,14 @@ impl App {
                 poster.post(move |app| app.on_overlay_preview(id, &text));
             },
         );
-        if self.overlay.is_some()
-            && let Some(hook) = &self.hook
-        {
+        if self.overlay.is_none() {
+            return;
+        }
+        if let Some(hook) = &self.hook {
             hook.set_capture_active(true);
         }
+        self.foreground_watch =
+            ForegroundWatch::start(self.hwnd, WM_APP_FOREGROUND_CHANGED, id as usize);
     }
 
     fn on_overlay_preview(&mut self, id: u64, text: &str) {
@@ -450,6 +475,7 @@ impl App {
         let Some(overlay) = self.overlay.take() else {
             return;
         };
+        self.foreground_watch = None;
         if let Some(hook) = &self.hook {
             hook.set_capture_active(false);
         }
@@ -631,6 +657,12 @@ unsafe extern "system" fn catcher_proc(
     if let Some(result) = overlay::catcher_default(hwnd, msg, wparam, lparam) {
         return result;
     }
+    if msg == WM_CAPTURECHANGED {
+        // 自分で外した時（確定・中止の後始末）は App を借りている最中に届くので、借りられなければ何もしない
+        let new_owner = HWND(lparam.0 as _);
+        with_app(|app| app.on_catcher_capture_lost(hwnd, new_owner));
+        return LRESULT(0);
+    }
     if !with_app(|app| app.on_overlay_mouse(msg, wparam)) {
         repost(hwnd, msg, wparam, lparam);
     }
@@ -643,6 +675,13 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
             if let Some(action) = action_from_code(wparam.0)
                 && !with_app(|app| app.on_hotkey(action))
             {
+                repost(hwnd, msg, wparam, lparam);
+            }
+            LRESULT(0)
+        }
+        WM_APP_FOREGROUND_CHANGED => {
+            let id = wparam.0 as u64;
+            if !with_app(|app| app.cancel_overlay(Some(id))) {
                 repost(hwnd, msg, wparam, lparam);
             }
             LRESULT(0)
