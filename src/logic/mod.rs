@@ -6,6 +6,7 @@ pub mod hotkey_filter;
 pub mod image;
 pub mod latest_only;
 pub mod ocr_support;
+pub mod preview_style;
 pub mod region_selection;
 pub mod result_layout;
 pub mod settings;
