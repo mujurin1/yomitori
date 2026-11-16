@@ -360,7 +360,7 @@ fn measure(font: HFONT, text: &str, max_width: i32) -> (i32, i32) {
     (r.right - r.left, r.bottom - r.top)
 }
 
-/// 背景 #141414 に白で text を描いて文字の濃さを読み、#DCDCDC の文字・半透明の背景・縁の画素にして窓に当てる
+/// 背景 #141414 に白で text を描いて文字の濃さを読み、#DCDCDC の文字・背景・縁の画素にして窓に当てる
 /// 外周の border px は縁（#787878）にする
 fn draw_layered(
     hwnd: HWND,

@@ -7,8 +7,8 @@ pub const FILL_ALPHA: u8 = 38;
 
 /// プレビューの背景の明るさ（#141414）
 pub const BACKGROUND_LEVEL: u8 = 0x14;
-/// プレビューの背景の不透明度 92%。文字は不透明
-pub const BACKGROUND_ALPHA: u8 = 235;
+/// プレビューの背景の不透明度（不透明）
+pub const BACKGROUND_ALPHA: u8 = 255;
 /// プレビューの文字の明るさ（#DCDCDC。白だと眩しいので落とす）
 pub const TEXT_LEVEL: u8 = 0xDC;
 /// プレビューの文字の大きさ（DIP）
@@ -23,7 +23,7 @@ pub fn is_border(x: i32, y: i32, width: i32, height: i32, border: i32) -> bool {
     x < border || y < border || x >= width - border || y >= height - border
 }
 
-/// 箱の (x, y) の画素。縁なら白・不透明、内側は compose（背景は半透明・文字は不透明）
+/// 箱の (x, y) の画素。縁なら BORDER_PIXEL、内側は compose
 pub fn pixel(x: i32, y: i32, width: i32, height: i32, border: i32, level: u8) -> [u8; 4] {
     if is_border(x, y, width, height, border) {
         BORDER_PIXEL
@@ -47,7 +47,7 @@ pub fn font_faces(text: &str) -> (&'static str, &'static str) {
 }
 
 /// 背景 #141414 の上に白で描いた画素の明るさ（0〜255）から、premultiplied BGRA を作る。
-/// 背景は BACKGROUND_ALPHA で半透明、文字の画素ほど不透明に近づき、文字そのものは不透明の TEXT_LEVEL になる。
+/// 背景は BACKGROUND_ALPHA の不透明度、文字の画素ほど TEXT_LEVEL に近づき、文字そのものは不透明の TEXT_LEVEL になる。
 /// 白で描くのは文字の濃さ（アンチエイリアス）を明るさから読むため
 pub fn compose(level: u8) -> [u8; 4] {
     let bg = f64::from(BACKGROUND_LEVEL);
@@ -75,13 +75,11 @@ mod tests {
     }
 
     #[test]
-    fn 背景の画素は141414の不透明度92パーセント() {
+    fn 背景の画素は141414で不透明() {
         let [b, g, r, a] = compose(BACKGROUND_LEVEL);
 
-        assert_eq!(235, a);
-        assert!((f64::from(a) / 255.0 - 0.92).abs() < 0.005);
-        // premultiplied: 0x14 × 235 / 255
-        assert_eq!([18, 18, 18], [b, g, r]);
+        assert_eq!(255, a);
+        assert_eq!([0x14, 0x14, 0x14], [b, g, r]);
     }
 
     #[test]
@@ -90,12 +88,12 @@ mod tests {
     }
 
     #[test]
-    fn 文字の縁は背景と白の間で不透明度も間() {
-        let [b, _, _, a] = compose(0x80);
+    fn 文字の縁は背景と文字の色の間で不透明() {
+        let [b, g, r, a] = compose(0x80);
 
-        assert!(a > BACKGROUND_ALPHA && a < 255, "{a}");
-        assert!(b > 18 && b < 0xDC, "{b}");
-        assert!(b <= a, "premultiplied は色が不透明度を超えない");
+        assert_eq!(255, a);
+        assert!(b > 0x14 && b < 0xDC, "{b}");
+        assert_eq!([b, b], [g, r]);
     }
 
     #[test]
