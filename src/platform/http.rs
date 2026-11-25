@@ -13,7 +13,7 @@ pub struct UreqHttp {
 impl UreqHttp {
     pub fn new() -> Self {
         let config = Agent::config_builder()
-            // 成功以外のステータスも応答として受け取り、判定は GoogleGtxTranslator に任せる
+            // 成功以外のステータスも応答として受け取り、判定は GoogleTranslator に任せる
             .http_status_as_error(false)
             .user_agent("Mozilla/5.0")
             .tls_config(

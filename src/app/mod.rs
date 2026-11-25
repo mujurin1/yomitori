@@ -33,7 +33,7 @@ use crate::logic::ocr_support;
 use crate::logic::region_selection::{MouseInput, line_marker_timing};
 use crate::logic::settings::AppSettings;
 use crate::logic::settings_store::{RealSettingsFiles, SettingsStore};
-use crate::logic::translation::{GoogleGtxTranslator, PendingTranslation, TranslationOutcome};
+use crate::logic::translation::{GoogleTranslator, PendingTranslation, TranslationOutcome};
 use crate::platform::capture::capture_screen;
 use crate::platform::foreground::ForegroundWatch;
 use crate::platform::http::UreqHttp;
@@ -235,7 +235,7 @@ fn create_main_window() -> windows::core::Result<HWND> {
 impl App {
     fn start(hwnd: HWND) -> windows::core::Result<Self> {
         let poster = UiPoster(hwnd.0 as isize);
-        let translator = Arc::new(GoogleGtxTranslator::new(UreqHttp::new()));
+        let translator = Arc::new(GoogleTranslator::new(UreqHttp::new()));
         let tray_icon = icon::small(unsafe { GetDpiForWindow(hwnd) }.max(96));
         let result = ResultWindow::create(translator, poster)?;
         let ocr = Arc::new(OcrService::start());
