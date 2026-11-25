@@ -149,6 +149,7 @@ struct App {
     hint: Option<Canvas>,
     next_id: u64,
     result: ResultWindow,
+    translator: Arc<GoogleTranslator<UreqHttp>>,
     ocr: Arc<OcrService>,
     store: SettingsStore<RealSettingsFiles>,
     settings: AppSettings,
@@ -237,7 +238,7 @@ impl App {
         let poster = UiPoster(hwnd.0 as isize);
         let translator = Arc::new(GoogleTranslator::new(UreqHttp::new()));
         let tray_icon = icon::small(unsafe { GetDpiForWindow(hwnd) }.max(96));
-        let result = ResultWindow::create(translator, poster)?;
+        let result = ResultWindow::create(Arc::clone(&translator) as _, poster)?;
         let ocr = Arc::new(OcrService::start());
         let tray = tray_icon
             .as_ref()
@@ -256,6 +257,7 @@ impl App {
             hint: None,
             next_id: 1,
             result,
+            translator,
             ocr,
             store: SettingsStore::new(settings_path, RealSettingsFiles, system::local_now),
             settings: AppSettings::default(),
@@ -351,6 +353,8 @@ impl App {
             hook.set_bindings(self.bindings());
         }
         self.result.set_placement(self.settings.result_window);
+        self.translator
+            .set_allow_http_as_last_resort(self.settings.allow_http_as_last_resort);
         let Some(message) = loaded.notification else {
             return false;
         };

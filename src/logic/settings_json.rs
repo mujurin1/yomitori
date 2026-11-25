@@ -50,6 +50,10 @@ pub fn serialize(s: &AppSettings) -> String {
             s.show_startup_notification
         ),
         format!("  \"keepLineBreaks\": {},", s.keep_line_breaks),
+        format!(
+            "  \"allowHttpAsLastResort\": {},",
+            s.allow_http_as_last_resort
+        ),
         "  \"resultWindow\": {".to_string(),
         format!("    \"left\": {},", nullable_number(p.left)),
         format!("    \"top\": {},", nullable_number(p.top)),
@@ -121,6 +125,13 @@ impl Reader {
                 .ok_or("keepLineBreaks は true か false にしてください")?;
         }
 
+        let mut allow_http = d.allow_http_as_last_resort;
+        if let Some(a) = self.child(root, "allowHttpAsLastResort") {
+            allow_http = a
+                .as_bool()
+                .ok_or("allowHttpAsLastResort は true か false にしてください")?;
+        }
+
         let mut placement = d.result_window;
         if let Some(rw) = self.child(root, "resultWindow") {
             let rw = require_object(rw, "resultWindow")?;
@@ -147,6 +158,7 @@ impl Reader {
             line_hotkey: line,
             show_startup_notification: notify,
             keep_line_breaks,
+            allow_http_as_last_resort: allow_http,
             result_window: placement,
         })
     }
@@ -230,6 +242,7 @@ mod tests {
           "hotkeys": { "region": "Ctrl+Alt+Q", "line": "F8" },
           "showStartupNotification": false,
           "keepLineBreaks": true,
+          "allowHttpAsLastResort": true,
           "resultWindow": { "left": 100, "top": -20.5, "width": 700, "height": 250 }
         }
         "#;
@@ -245,6 +258,7 @@ mod tests {
             line_hotkey: line.into(),
             show_startup_notification: notify,
             keep_line_breaks: true,
+            allow_http_as_last_resort: false,
             result_window: placement,
         }
     }
@@ -269,12 +283,15 @@ mod tests {
 
         assert_eq!(SettingsParseStatus::Valid, r.status);
         assert_eq!(
-            settings(
-                "Ctrl+Alt+Q",
-                "F8",
-                false,
-                placement(Some(100.0), Some(-20.5), 700.0, 250.0)
-            ),
+            AppSettings {
+                allow_http_as_last_resort: true,
+                ..settings(
+                    "Ctrl+Alt+Q",
+                    "F8",
+                    false,
+                    placement(Some(100.0), Some(-20.5), 700.0, 250.0)
+                )
+            },
             r.settings
         );
     }
@@ -333,12 +350,21 @@ mod tests {
 
         assert!(
             text.contains(
-                "  \"showStartupNotification\": true,\r\n  \"keepLineBreaks\": false,\r\n  \"resultWindow\""
+                "  \"showStartupNotification\": true,\r\n  \"keepLineBreaks\": false,\r\n"
             ),
             "{text}"
         );
         assert_eq!(s, parse(&text).settings);
         assert_eq!(SettingsParseStatus::Valid, parse(&text).status);
+    }
+
+    #[test]
+    fn 最後の手段のhttpは既定で許さず書いた値はそのまま() {
+        assert!(!AppSettings::default().allow_http_as_last_resort);
+        assert!(!parse("{}").settings.allow_http_as_last_resort);
+        let r = parse(r#"{ "allowHttpAsLastResort": true }"#);
+        assert_eq!(SettingsParseStatus::MissingFilled, r.status);
+        assert!(r.settings.allow_http_as_last_resort);
     }
 
     #[test]
@@ -380,6 +406,8 @@ mod tests {
             r#"{ "showStartupNotification": "yes" }"#,
             r#"{ "keepLineBreaks": "yes" }"#,
             r#"{ "keepLineBreaks": null }"#,
+            r#"{ "allowHttpAsLastResort": "yes" }"#,
+            r#"{ "allowHttpAsLastResort": null }"#,
             r#"{ "resultWindow": null }"#,
             r#"{ "resultWindow": { "left": "10" } }"#,
             r#"{ "resultWindow": { "width": 299 } }"#,
@@ -425,7 +453,7 @@ mod tests {
 
     #[test]
     fn 最小の大きさちょうどは正しい() {
-        let json = r#"{ "hotkeys": { "region": "Win+Q", "line": "Win+W" }, "showStartupNotification": true, "keepLineBreaks": true, "resultWindow": { "left": null, "top": null, "width": 300, "height": 200 } }"#;
+        let json = r#"{ "hotkeys": { "region": "Win+Q", "line": "Win+W" }, "showStartupNotification": true, "keepLineBreaks": true, "allowHttpAsLastResort": false, "resultWindow": { "left": null, "top": null, "width": 300, "height": 200 } }"#;
 
         assert_eq!(SettingsParseStatus::Valid, parse(json).status);
     }

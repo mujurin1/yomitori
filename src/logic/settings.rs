@@ -35,6 +35,8 @@ pub struct AppSettings {
     pub show_startup_notification: bool,
     /// OCR の複数行を改行のまま残すか（false なら空白で 1 段落にする）
     pub keep_line_breaks: bool,
+    /// https の窓口が全部制限された時に、平文の http で翻訳を送ってよいか
+    pub allow_http_as_last_resort: bool,
     pub result_window: ResultWindowPlacement,
 }
 
@@ -45,6 +47,7 @@ impl Default for AppSettings {
             line_hotkey: "Win+W".into(),
             show_startup_notification: true,
             keep_line_breaks: true,
+            allow_http_as_last_resort: false,
             result_window: ResultWindowPlacement::DEFAULT,
         }
     }

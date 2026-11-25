@@ -61,6 +61,7 @@ exe と同じフォルダの `settings.json`。書き換えたらトレイの「
   "hotkeys": { "region": "Win+Q", "line": "Win+W" },
   "showStartupNotification": true,
   "keepLineBreaks": true,
+  "allowHttpAsLastResort": false,
   "resultWindow": { "left": null, "top": null, "width": 600, "height": 200 }
 }
 ```
@@ -71,6 +72,7 @@ exe と同じフォルダの `settings.json`。書き換えたらトレイの「
 | `hotkeys.line` | カーソル行のホットキー |
 | `showStartupNotification` | 起動時にホットキーの案内を出すか |
 | `keepLineBreaks` | 範囲指定で読んだ複数行を改行のまま残すか。`false` なら空白でつないで 1 段落にする |
+| `allowHttpAsLastResort` | 翻訳が https の窓口で全部断られた時に、暗号化しない http で送ってよいか。読み取った文が平文で流れる |
 | `resultWindow.left` / `top` | 結果ウィンドウの位置。`null` なら画面中央 |
 | `resultWindow.width` / `height` | 結果ウィンドウの大きさ。幅 300 以上・高さ 200 以上 |
 

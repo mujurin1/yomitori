@@ -41,7 +41,7 @@ pub mod google {
     pub enum Endpoint {
         GtxHttps,
         DictChromeExHttps,
-        /// 平文で送る。https の窓口が両方とも制限された時だけ使う
+        /// 平文で送る。許された時だけ、https の窓口が全部制限された後に使う。ORDER の最後に置く
         GtxHttp,
     }
 
@@ -161,14 +161,33 @@ pub trait HttpGet: Send + Sync {
 /// 時間切れ等の他の失敗では移らない（窓口の数だけ待たせない）
 pub struct GoogleTranslator<H: HttpGet> {
     http: H,
+    /// 翻訳のスレッドから読み、設定の再読み込みで UI スレッドから書く
+    allow_http: AtomicBool,
 }
 
 impl<H: HttpGet> GoogleTranslator<H> {
     /// 窓口 1 つあたり
     pub const TIMEOUT: Duration = Duration::from_secs(5);
 
+    /// http の窓口は set_allow_http_as_last_resort で許すまで使わない
     pub fn new(http: H) -> Self {
-        Self { http }
+        Self {
+            http,
+            allow_http: AtomicBool::new(false),
+        }
+    }
+
+    pub fn set_allow_http_as_last_resort(&self, allow: bool) {
+        self.allow_http.store(allow, Ordering::SeqCst);
+    }
+
+    fn endpoints(&self) -> &'static [google::Endpoint] {
+        let all = &google::Endpoint::ORDER;
+        if self.allow_http.load(Ordering::SeqCst) {
+            all
+        } else {
+            &all[..2]
+        }
     }
 
     fn translate_at(
@@ -220,7 +239,7 @@ impl<H: HttpGet> Translator for GoogleTranslator<H> {
         cancel: &CancelToken,
     ) -> Result<String, String> {
         let mut last = String::new();
-        for endpoint in google::Endpoint::ORDER {
+        for &endpoint in self.endpoints() {
             if cancel.is_cancelled() {
                 break;
             }
@@ -527,6 +546,12 @@ mod tests {
         assert_eq!(uris(&[google::Endpoint::GtxHttps], "C# & F#"), http.urls());
     }
 
+    fn translator(http: &StubHttp, allow_http: bool) -> GoogleTranslator<&StubHttp> {
+        let translator = GoogleTranslator::new(http);
+        translator.set_allow_http_as_last_resort(allow_http);
+        translator
+    }
+
     #[test]
     fn 制限を返されたら次の窓口へ順に移る() {
         use google::Endpoint::*;
@@ -547,8 +572,7 @@ mod tests {
         for (responses, sent) in cases {
             let http = StubHttp::new(responses);
 
-            let result =
-                GoogleTranslator::new(&http).translate("x", "en", "ja", &CancelToken::new());
+            let result = translator(&http, true).translate("x", "en", "ja", &CancelToken::new());
 
             assert_eq!(Ok("訳".to_string()), result, "{sent}");
             assert_eq!(
@@ -560,18 +584,27 @@ mod tests {
 
     #[test]
     fn 全部の窓口に制限されたら最後のステータスを添えた失敗にする() {
-        let http = StubHttp::new(vec![
-            ok(429, "Too Many Requests", ""),
-            ok(429, "Too Many Requests", ""),
-            ok(429, "Too Many Requests", ""),
-        ]);
+        for (allow_http, sent) in [(true, 3), (false, 2)] {
+            let http = StubHttp::new(vec![ok(429, "Too Many Requests", ""); sent]);
 
-        let error = GoogleTranslator::new(&http)
-            .translate("x", "en", "ja", &CancelToken::new())
-            .unwrap_err();
+            let error = translator(&http, allow_http)
+                .translate("x", "en", "ja", &CancelToken::new())
+                .unwrap_err();
 
-        assert!(error.contains("429"), "{error}");
-        assert_eq!(3, http.urls().len());
+            assert!(error.contains("429"), "{allow_http} {error}");
+            assert_eq!(sent, http.urls().len(), "{allow_http}");
+        }
+    }
+
+    #[test]
+    fn httpは許されるまでどの窓口でも使わない() {
+        let http = StubHttp::new(vec![ok(429, "Too Many Requests", ""); 2]);
+
+        let _ = GoogleTranslator::new(&http).translate("x", "en", "ja", &CancelToken::new());
+
+        let urls = http.urls();
+        assert_eq!(2, urls.len());
+        assert!(urls.iter().all(|u| u.starts_with("https://")), "{urls:?}");
     }
 
     #[test]
