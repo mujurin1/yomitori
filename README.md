@@ -100,7 +100,7 @@ JSON として読めない・値が不正な時は、`settings.json.bak_yyyyMMdd
 
 ## 注意
 
-- 翻訳には Google 翻訳の非公式のエンドポイント（`translate.googleapis.com` の `client=gtx`）を使っている。予告なく使えなくなることがあり、読み取った文字列は Google に送られる
+- 翻訳には Google 翻訳の非公式のエンドポイント（`translate.googleapis.com` の `client=gtx`。回数の制限で断られたら `clients5.google.com` の `client=dict-chrome-ex`）を使っている。予告なく使えなくなることがあり、読み取った文字列は Google に送られる
 - 管理者権限のウィンドウが前面にある間は、ホットキーが効かない
 - yomitori の動作中は、Win+Q・Win+W（Windows の検索・ウィジェット）を yomitori が受ける
 - OCR は英語だけ、訳は英語 → 日本語だけ
