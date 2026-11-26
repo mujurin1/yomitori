@@ -19,7 +19,7 @@ use windows::Win32::UI::WindowsAndMessaging::{
     BS_AUTOCHECKBOX, BS_DEFPUSHBUTTON, BS_PUSHBUTTON, CW_USEDEFAULT, CreateWindowExW,
     DefWindowProcW, DestroyWindow, ES_AUTOVSCROLL, ES_MULTILINE, ES_READONLY, ES_WANTRETURN,
     GetClientRect, GetDlgItem, GetWindowTextLengthW, GetWindowTextW, HMENU, HWND_NOTOPMOST,
-    HWND_TOPMOST, ICON_BIG, ICON_SMALL, IDCANCEL, IDOK, IsDialogMessageW, IsIconic,
+    HWND_TOP, HWND_TOPMOST, ICON_BIG, ICON_SMALL, IDCANCEL, IDOK, IsDialogMessageW, IsIconic,
     IsWindowVisible, MINMAXINFO, MSG, MoveWindow, RegisterClassW, SW_HIDE, SW_SHOWNOACTIVATE,
     SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER, SendMessageW, SetWindowPos,
     SetWindowTextW, ShowWindow, WINDOW_EX_STYLE, WINDOW_STYLE, WM_CLOSE, WM_COMMAND,
@@ -353,6 +353,24 @@ impl ResultWindow {
             if !IsWindowVisible(self.hwnd).as_bool() || IsIconic(self.hwnd).as_bool() {
                 let _ = ShowWindow(self.hwnd, SW_SHOWNOACTIVATE);
             }
+            // 見えたままでも前に出し直す。Topmost でも、後から最前面にされた他のウィンドウ（PowerToys の「常に手前」等）の裏に回る
+            let _ = SetWindowPos(
+                self.hwnd,
+                Some(self.z_order_top()),
+                0,
+                0,
+                0,
+                0,
+                SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE,
+            );
+        }
+    }
+
+    fn z_order_top(&self) -> HWND {
+        if unsafe { IsDlgButtonChecked(self.hwnd, ID_TOPMOST) } == BST_CHECKED.0 {
+            HWND_TOPMOST
+        } else {
+            HWND_TOP
         }
     }
 

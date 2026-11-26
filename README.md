@@ -61,6 +61,7 @@ exe と同じフォルダの `settings.json`。書き換えたらトレイの「
   "hotkeys": { "region": "Win+Q", "line": "Win+W" },
   "showStartupNotification": true,
   "keepLineBreaks": true,
+  "allowHttpAsLastResort": false,
   "resultWindow": { "left": null, "top": null, "width": 600, "height": 200 }
 }
 ```
@@ -71,6 +72,7 @@ exe と同じフォルダの `settings.json`。書き換えたらトレイの「
 | `hotkeys.line` | カーソル行のホットキー |
 | `showStartupNotification` | 起動時にホットキーの案内を出すか |
 | `keepLineBreaks` | 範囲指定で読んだ複数行を改行のまま残すか。`false` なら空白でつないで 1 段落にする |
+| `allowHttpAsLastResort` | 翻訳が https の窓口で全部断られた時に、暗号化しない http で送ってよいか。読み取った文が平文で流れる |
 | `resultWindow.left` / `top` | 結果ウィンドウの位置。`null` なら画面中央 |
 | `resultWindow.width` / `height` | 結果ウィンドウの大きさ。幅 300 以上・高さ 200 以上 |
 
@@ -98,7 +100,7 @@ JSON として読めない・値が不正な時は、`settings.json.bak_yyyyMMdd
 
 ## 注意
 
-- 翻訳には Google 翻訳の非公式のエンドポイント（`translate.googleapis.com` の `client=gtx`）を使っている。予告なく使えなくなることがあり、読み取った文字列は Google に送られる
+- 翻訳には Google 翻訳の非公式のエンドポイント（`translate.googleapis.com` の `client=gtx`。回数の制限で断られたら `clients5.google.com` の `client=dict-chrome-ex`）を使っている。予告なく使えなくなることがあり、読み取った文字列は Google に送られる
 - 管理者権限のウィンドウが前面にある間は、ホットキーが効かない
 - yomitori の動作中は、Win+Q・Win+W（Windows の検索・ウィジェット）を yomitori が受ける
 - OCR は英語だけ、訳は英語 → 日本語だけ

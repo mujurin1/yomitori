@@ -32,20 +32,61 @@ pub trait Translator: Send + Sync {
     ) -> Result<String, String>;
 }
 
-/// Google 非公式エンドポイント gtx の URL と応答
-pub mod gtx {
+/// Google 翻訳の非公式の窓口の URL と応答
+pub mod google {
     use serde_json::Value;
 
-    pub const ENDPOINT: &str = "https://translate.googleapis.com/translate_a/single";
+    /// 送る窓口。GoogleTranslator は ORDER の順に試す
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    pub enum Endpoint {
+        GtxHttps,
+        DictChromeExHttps,
+        /// 平文で送る。許された時だけ、https の窓口が全部制限された後に使う。ORDER の最後に置く
+        GtxHttp,
+    }
 
-    /// クエリ値はすべて URL エンコードする（# + & 改行・非 ASCII が壊れないように）
-    pub fn build_uri(text: &str, from: &str, to: &str) -> String {
-        format!(
-            "{ENDPOINT}?client=gtx&sl={}&tl={}&dt=t&q={}",
-            escape_data_string(from),
-            escape_data_string(to),
-            escape_data_string(text)
-        )
+    impl Endpoint {
+        pub const ORDER: [Endpoint; 3] = [
+            Endpoint::GtxHttps,
+            Endpoint::DictChromeExHttps,
+            Endpoint::GtxHttp,
+        ];
+
+        /// クエリ値はすべて URL エンコードする（# + & 改行・非 ASCII が壊れないように）
+        pub fn build_uri(self, text: &str, from: &str, to: &str) -> String {
+            let (base, client, extra) = match self {
+                Endpoint::GtxHttps => (
+                    "https://translate.googleapis.com/translate_a/single",
+                    "gtx",
+                    "&dt=t",
+                ),
+                Endpoint::DictChromeExHttps => (
+                    "https://clients5.google.com/translate_a/t",
+                    "dict-chrome-ex",
+                    "",
+                ),
+                Endpoint::GtxHttp => (
+                    "http://translate.googleapis.com/translate_a/single",
+                    "gtx",
+                    "&dt=t",
+                ),
+            };
+            format!(
+                "{base}?client={client}&sl={}&tl={}{extra}&q={}",
+                escape_data_string(from),
+                escape_data_string(to),
+                escape_data_string(text)
+            )
+        }
+
+        pub fn parse_response(self, json: &str) -> Result<String, String> {
+            let root: Value = serde_json::from_str(json)
+                .map_err(|_| "翻訳の応答が JSON ではありません".to_string())?;
+            match self {
+                Endpoint::GtxHttps | Endpoint::GtxHttp => parse_gtx(&root),
+                Endpoint::DictChromeExHttps => parse_dict_chrome_ex(&root),
+            }
+        }
     }
 
     /// RFC 3986 の非予約文字（英数字と `-._~`）以外を UTF-8 の %XX にする
@@ -63,10 +104,8 @@ pub mod gtx {
 
     const UNEXPECTED_SHAPE: &str = "翻訳の応答の形が想定と違います";
 
-    /// 応答 JSON の [0][i][0] を順に連結する。形が違えば理由
-    pub fn parse_response(json: &str) -> Result<String, String> {
-        let root: Value = serde_json::from_str(json)
-            .map_err(|_| "翻訳の応答が JSON ではありません".to_string())?;
+    /// [0][i][0] を順に連結する
+    fn parse_gtx(root: &Value) -> Result<String, String> {
         let segments = root
             .as_array()
             .and_then(|a| a.first())
@@ -79,6 +118,21 @@ pub mod gtx {
             .iter()
             .filter_map(|segment| segment.as_array()?.first()?.as_str())
             .collect())
+    }
+
+    /// 言語を指定すると ["訳"]、sl=auto だと [["訳","検出した言語"]]
+    fn parse_dict_chrome_ex(root: &Value) -> Result<String, String> {
+        let first = root
+            .as_array()
+            .and_then(|a| a.first())
+            .ok_or(UNEXPECTED_SHAPE)?;
+        let text = match first {
+            Value::String(s) => Some(s.as_str()),
+            Value::Array(a) => a.first().and_then(Value::as_str),
+            _ => None,
+        };
+        text.map(str::to_string)
+            .ok_or_else(|| UNEXPECTED_SHAPE.to_string())
     }
 }
 
@@ -103,44 +157,99 @@ pub trait HttpGet: Send + Sync {
     fn get(&self, url: &str, timeout: Duration) -> Result<HttpResponse, HttpError>;
 }
 
-pub struct GoogleGtxTranslator<H: HttpGet> {
+/// Google 翻訳の窓口を順に試す。制限（429・503）を返されたら次の窓口へ移る。
+/// 時間切れ等の他の失敗では移らない（窓口の数だけ待たせない）
+pub struct GoogleTranslator<H: HttpGet> {
     http: H,
+    /// 翻訳のスレッドから読み、設定の再読み込みで UI スレッドから書く
+    allow_http: AtomicBool,
 }
 
-impl<H: HttpGet> GoogleGtxTranslator<H> {
+impl<H: HttpGet> GoogleTranslator<H> {
+    /// 窓口 1 つあたり
     pub const TIMEOUT: Duration = Duration::from_secs(5);
 
+    /// http の窓口は set_allow_http_as_last_resort で許すまで使わない
     pub fn new(http: H) -> Self {
-        Self { http }
+        Self {
+            http,
+            allow_http: AtomicBool::new(false),
+        }
+    }
+
+    pub fn set_allow_http_as_last_resort(&self, allow: bool) {
+        self.allow_http.store(allow, Ordering::SeqCst);
+    }
+
+    fn endpoints(&self) -> &'static [google::Endpoint] {
+        let all = &google::Endpoint::ORDER;
+        if self.allow_http.load(Ordering::SeqCst) {
+            all
+        } else {
+            &all[..2]
+        }
+    }
+
+    fn translate_at(
+        &self,
+        endpoint: google::Endpoint,
+        text: &str,
+        from: &str,
+        to: &str,
+    ) -> Result<String, Failure> {
+        let response = self
+            .http
+            .get(&endpoint.build_uri(text, from, to), Self::TIMEOUT)
+            .map_err(|e| match e {
+                HttpError::Timeout => Failure::Other(format!(
+                    "翻訳が {} 秒以内に終わりませんでした",
+                    Self::TIMEOUT.as_secs()
+                )),
+                HttpError::Other(message) => Failure::Other(message),
+            })?;
+        if !(200..300).contains(&response.status) {
+            let message = format!(
+                "翻訳サーバーがエラーを返しました: {} {}",
+                response.status, response.reason
+            );
+            return Err(if matches!(response.status, 429 | 503) {
+                Failure::Limited(message)
+            } else {
+                Failure::Other(message)
+            });
+        }
+        endpoint
+            .parse_response(&response.body)
+            .map_err(Failure::Other)
     }
 }
 
-impl<H: HttpGet> Translator for GoogleGtxTranslator<H> {
-    /// 送り始めた要求は止められないので cancel は見ない。取り消した翻訳の結果は LatestTranslation が捨てる
+enum Failure {
+    Limited(String),
+    Other(String),
+}
+
+impl<H: HttpGet> Translator for GoogleTranslator<H> {
+    /// 送り始めた要求は止められないので、取り消しは窓口を移る前にだけ見る。取り消した翻訳の結果は LatestTranslation が捨てる
     fn translate(
         &self,
         text: &str,
         from: &str,
         to: &str,
-        _cancel: &CancelToken,
+        cancel: &CancelToken,
     ) -> Result<String, String> {
-        let response = self
-            .http
-            .get(&gtx::build_uri(text, from, to), Self::TIMEOUT)
-            .map_err(|e| match e {
-                HttpError::Timeout => format!(
-                    "翻訳が {} 秒以内に終わりませんでした",
-                    Self::TIMEOUT.as_secs()
-                ),
-                HttpError::Other(message) => message,
-            })?;
-        if !(200..300).contains(&response.status) {
-            return Err(format!(
-                "翻訳サーバーがエラーを返しました: {} {}",
-                response.status, response.reason
-            ));
+        let mut last = String::new();
+        for &endpoint in self.endpoints() {
+            if cancel.is_cancelled() {
+                break;
+            }
+            match self.translate_at(endpoint, text, from, to) {
+                Ok(translated) => return Ok(translated),
+                Err(Failure::Limited(message)) => last = message,
+                Err(Failure::Other(message)) => return Err(message),
+            }
         }
-        gtx::parse_response(&response.body)
+        Err(last)
     }
 }
 
@@ -276,80 +385,122 @@ mod tests {
             "100% sure? a=b;c/d",
         ];
         for text in cases {
-            let uri = gtx::build_uri(text, "en", "ja");
+            for endpoint in google::Endpoint::ORDER {
+                let uri = endpoint.build_uri(text, "en", "ja");
 
-            assert_eq!(text, unescape(&query_value(&uri, "q")), "{text:?}");
+                assert_eq!(
+                    text,
+                    unescape(&query_value(&uri, "q")),
+                    "{endpoint:?} {text:?}"
+                );
+            }
         }
     }
 
     #[test]
     fn 区切りとして働く記号は生のまま入らない() {
-        let uri = gtx::build_uri("a#b+c&d=e f", "en", "ja");
+        for endpoint in google::Endpoint::ORDER {
+            let uri = endpoint.build_uri("a#b+c&d=e f", "en", "ja");
 
-        let q = query_value(&uri, "q");
-        for c in ['#', '+', '&', '=', ' '] {
-            assert!(!q.contains(c), "{c:?} in {q}");
+            let q = query_value(&uri, "q");
+            for c in ['#', '+', '&', '=', ' '] {
+                assert!(!q.contains(c), "{endpoint:?} {c:?} in {q}");
+            }
+            assert!(!uri.contains('#'), "{uri}");
         }
-        assert!(!uri.contains('#'), "{uri}");
     }
 
     #[test]
-    fn 固定のパラメータと言語が入る() {
-        let uri = gtx::build_uri("hello", "en", "ja");
+    fn 窓口ごとに決まった場所と言語のパラメータで送る() {
+        use google::Endpoint::*;
+        let cases = [
+            (
+                GtxHttps,
+                "https://translate.googleapis.com/translate_a/single",
+                "gtx",
+            ),
+            (
+                DictChromeExHttps,
+                "https://clients5.google.com/translate_a/t",
+                "dict-chrome-ex",
+            ),
+            (
+                GtxHttp,
+                "http://translate.googleapis.com/translate_a/single",
+                "gtx",
+            ),
+        ];
+        for (endpoint, base, client) in cases {
+            let uri = endpoint.build_uri("hello", "en", "ja");
 
-        assert_eq!(
-            Some("https://translate.googleapis.com/translate_a/single"),
-            uri.split('?').next()
-        );
-        assert_eq!("gtx", query_value(&uri, "client"));
-        assert_eq!("en", query_value(&uri, "sl"));
-        assert_eq!("ja", query_value(&uri, "tl"));
-        assert_eq!("t", query_value(&uri, "dt"));
+            assert_eq!(Some(base), uri.split('?').next(), "{endpoint:?}");
+            assert_eq!(client, query_value(&uri, "client"), "{endpoint:?}");
+            assert_eq!("en", query_value(&uri, "sl"), "{endpoint:?}");
+            assert_eq!("ja", query_value(&uri, "tl"), "{endpoint:?}");
+        }
+        assert_eq!("t", query_value(&GtxHttps.build_uri("x", "en", "ja"), "dt"));
     }
 
     #[test]
-    fn 各区間の訳文を順に連結する() {
-        let json = r#"[[["こんにちは。","Hello.",null,null,10],["世界。","World.",null,null,10]],null,"en"]"#;
-
-        assert_eq!(
-            Ok("こんにちは。世界。".to_string()),
-            gtx::parse_response(json)
-        );
-    }
-
-    #[test]
-    fn 訳文が文字列でない区間は飛ばす() {
-        let json = r#"[[["A",null],[null,"x"],[],["B"]],null,"en"]"#;
-
-        assert_eq!(Ok("AB".to_string()), gtx::parse_response(json));
-    }
-
-    #[test]
-    fn 区間がnullなら空文字列() {
-        assert_eq!(
-            Ok(String::new()),
-            gtx::parse_response(r#"[null,null,"en"]"#)
-        );
+    fn 応答から訳文を取り出す() {
+        use google::Endpoint::*;
+        let cases = [
+            (
+                GtxHttps,
+                r#"[[["こんにちは。","Hello.",null,null,10],["世界。","World.",null,null,10]],null,"en"]"#,
+                "こんにちは。世界。",
+            ),
+            (
+                GtxHttp,
+                r#"[[["A",null],[null,"x"],[],["B"]],null,"en"]"#,
+                "AB",
+            ),
+            (GtxHttps, r#"[null,null,"en"]"#, ""),
+            (DictChromeExHttps, r#"["一行目\n二行目"]"#, "一行目\n二行目"),
+            (DictChromeExHttps, r#"[["こんにちは","en"]]"#, "こんにちは"),
+        ];
+        for (endpoint, json, expected) in cases {
+            assert_eq!(
+                Ok(expected.to_string()),
+                endpoint.parse_response(json),
+                "{endpoint:?} {json}"
+            );
+        }
     }
 
     #[test]
     fn 形が違う応答は失敗にする() {
-        for json in ["not json", "{}", "[]", r#"["x"]"#] {
-            assert!(gtx::parse_response(json).is_err(), "{json}");
+        for endpoint in google::Endpoint::ORDER {
+            for json in ["not json", "{}", "[]", "[1]"] {
+                assert!(
+                    endpoint.parse_response(json).is_err(),
+                    "{endpoint:?} {json}"
+                );
+            }
         }
     }
 
+    /// 呼ばれた順に responses を返す
     struct StubHttp {
-        response: Result<HttpResponse, HttpError>,
+        responses: Mutex<Vec<Result<HttpResponse, HttpError>>>,
         requests: Mutex<Vec<(String, Duration)>>,
     }
 
     impl StubHttp {
-        fn new(response: Result<HttpResponse, HttpError>) -> Self {
+        fn new(responses: Vec<Result<HttpResponse, HttpError>>) -> Self {
             Self {
-                response,
+                responses: Mutex::new(responses.into_iter().rev().collect()),
                 requests: Mutex::default(),
             }
+        }
+
+        fn urls(&self) -> Vec<String> {
+            self.requests
+                .lock()
+                .unwrap()
+                .iter()
+                .map(|(url, _)| url.clone())
+                .collect()
         }
     }
 
@@ -359,7 +510,11 @@ mod tests {
                 .lock()
                 .unwrap()
                 .push((url.to_string(), timeout));
-            self.response.clone()
+            self.responses
+                .lock()
+                .unwrap()
+                .pop()
+                .expect("想定より多く送った")
         }
     }
 
@@ -371,37 +526,122 @@ mod tests {
         })
     }
 
-    #[test]
-    fn エンコードしたurlにgetし応答の訳文を返す() {
-        let http = StubHttp::new(ok(200, "OK", r#"[[["訳","src"]],null,"en"]"#));
-        let translator = GoogleGtxTranslator::new(&http);
+    const GTX_OK: &str = r#"[[["訳","src"]],null,"en"]"#;
 
-        let result = translator.translate("C# & F#", "en", "ja", &CancelToken::new());
-
-        assert_eq!(Ok("訳".to_string()), result);
-        let requests = http.requests.lock().unwrap();
-        assert_eq!(1, requests.len());
-        assert_eq!(gtx::build_uri("C# & F#", "en", "ja"), requests[0].0);
+    fn uris(endpoints: &[google::Endpoint], text: &str) -> Vec<String> {
+        endpoints
+            .iter()
+            .map(|e| e.build_uri(text, "en", "ja"))
+            .collect()
     }
 
     #[test]
-    fn 成功以外のステータスは失敗にする() {
-        let http = StubHttp::new(ok(429, "Too Many Requests", ""));
-        let translator = GoogleGtxTranslator::new(&http);
+    fn 最初はhttpsのgtxに送り応答の訳文を返す() {
+        let http = StubHttp::new(vec![ok(200, "OK", GTX_OK)]);
 
-        let error = translator
-            .translate("x", "en", "ja", &CancelToken::new())
-            .unwrap_err();
+        let result =
+            GoogleTranslator::new(&http).translate("C# & F#", "en", "ja", &CancelToken::new());
 
-        assert!(error.contains("429"), "{error}");
+        assert_eq!(Ok("訳".to_string()), result);
+        assert_eq!(uris(&[google::Endpoint::GtxHttps], "C# & F#"), http.urls());
+    }
+
+    fn translator(http: &StubHttp, allow_http: bool) -> GoogleTranslator<&StubHttp> {
+        let translator = GoogleTranslator::new(http);
+        translator.set_allow_http_as_last_resort(allow_http);
+        translator
+    }
+
+    #[test]
+    fn 制限を返されたら次の窓口へ順に移る() {
+        use google::Endpoint::*;
+        let cases = [
+            (
+                vec![ok(429, "Too Many Requests", ""), ok(200, "OK", r#"["訳"]"#)],
+                2,
+            ),
+            (
+                vec![
+                    ok(503, "Service Unavailable", ""),
+                    ok(429, "Too Many Requests", ""),
+                    ok(200, "OK", GTX_OK),
+                ],
+                3,
+            ),
+        ];
+        for (responses, sent) in cases {
+            let http = StubHttp::new(responses);
+
+            let result = translator(&http, true).translate("x", "en", "ja", &CancelToken::new());
+
+            assert_eq!(Ok("訳".to_string()), result, "{sent}");
+            assert_eq!(
+                uris(&[GtxHttps, DictChromeExHttps, GtxHttp][..sent], "x"),
+                http.urls()
+            );
+        }
+    }
+
+    #[test]
+    fn 全部の窓口に制限されたら最後のステータスを添えた失敗にする() {
+        for (allow_http, sent) in [(true, 3), (false, 2)] {
+            let http = StubHttp::new(vec![ok(429, "Too Many Requests", ""); sent]);
+
+            let error = translator(&http, allow_http)
+                .translate("x", "en", "ja", &CancelToken::new())
+                .unwrap_err();
+
+            assert!(error.contains("429"), "{allow_http} {error}");
+            assert_eq!(sent, http.urls().len(), "{allow_http}");
+        }
+    }
+
+    #[test]
+    fn httpは許されるまでどの窓口でも使わない() {
+        let http = StubHttp::new(vec![ok(429, "Too Many Requests", ""); 2]);
+
+        let _ = GoogleTranslator::new(&http).translate("x", "en", "ja", &CancelToken::new());
+
+        let urls = http.urls();
+        assert_eq!(2, urls.len());
+        assert!(urls.iter().all(|u| u.starts_with("https://")), "{urls:?}");
+    }
+
+    #[test]
+    fn 制限以外の失敗では次の窓口へ移らない() {
+        let cases = [
+            ok(500, "Internal Server Error", ""),
+            ok(200, "OK", "not json"),
+            Err(HttpError::Timeout),
+            Err(HttpError::Other("接続できません".into())),
+        ];
+        for response in cases {
+            let http = StubHttp::new(vec![response.clone()]);
+
+            let result =
+                GoogleTranslator::new(&http).translate("x", "en", "ja", &CancelToken::new());
+
+            assert!(result.is_err(), "{response:?}");
+            assert_eq!(1, http.urls().len(), "{response:?}");
+        }
+    }
+
+    #[test]
+    fn 取り消された後はどの窓口へも送らない() {
+        let http = StubHttp::new(vec![ok(429, "Too Many Requests", "")]);
+        let cancel = CancelToken::new();
+        cancel.cancel();
+
+        let _ = GoogleTranslator::new(&http).translate("x", "en", "ja", &cancel);
+
+        assert!(http.urls().is_empty());
     }
 
     #[test]
     fn 時間切れは5秒で区切り秒数を添えた失敗にする() {
-        let http = StubHttp::new(Err(HttpError::Timeout));
-        let translator = GoogleGtxTranslator::new(&http);
+        let http = StubHttp::new(vec![Err(HttpError::Timeout)]);
 
-        let error = translator
+        let error = GoogleTranslator::new(&http)
             .translate("x", "en", "ja", &CancelToken::new())
             .unwrap_err();
 
